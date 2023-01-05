@@ -205,11 +205,15 @@ def parse_args(input_args=None):
     parser.add_argument(
         "--pin_memory", action="store_true", help="Whether or not to set pin_memory=True in Dataloader."
     )
+    parser.add_argument("--benchmark", action="store_true", help="Whether or not to enable cudnn benchmark.")
 
     if input_args is not None:
         args = parser.parse_args(input_args)
     else:
         args = parser.parse_args()
+
+    if args.benchmark:
+        torch.backends.cudnn.benchmark = True
 
     env_local_rank = int(os.environ.get("LOCAL_RANK", -1))
     if env_local_rank != -1 and env_local_rank != args.local_rank:
