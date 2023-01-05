@@ -202,6 +202,9 @@ def parse_args(input_args=None):
         action="store_true",
         help="Whether or not to set set_to_none=True in optimizer.zero_grad.",
     )
+    parser.add_argument(
+        "--pin_memory", action="store_true", help="Whether or not to set pin_memory=True in Dataloader."
+    )
 
     if input_args is not None:
         args = parser.parse_args(input_args)
@@ -517,7 +520,12 @@ def main(args):
         return batch
 
     train_dataloader = torch.utils.data.DataLoader(
-        train_dataset, batch_size=args.train_batch_size, shuffle=True, collate_fn=collate_fn, num_workers=1
+        train_dataset,
+        batch_size=args.train_batch_size,
+        shuffle=True,
+        collate_fn=collate_fn,
+        num_workers=1,
+        pin_memory=args.pin_memory,
     )
 
     # Scheduler and math around the number of training steps.
