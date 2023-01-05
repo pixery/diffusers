@@ -4,7 +4,6 @@ import itertools
 import math
 import os
 from pathlib import Path
-from typing import Optional
 
 import torch
 import torch.nn.functional as F
@@ -16,7 +15,6 @@ from accelerate.logging import get_logger
 from accelerate.utils import set_seed
 from diffusers import AutoencoderKL, DDPMScheduler, StableDiffusionPipeline, UNet2DConditionModel
 from diffusers.optimization import get_scheduler
-from huggingface_hub import HfFolder, Repository, whoami
 from PIL import Image
 from torchvision import transforms
 from tqdm.auto import tqdm
@@ -213,6 +211,9 @@ def parse_args(input_args=None):
     else:
         args = parser.parse_args()
 
+    if args.push_to_hub:
+        raise NotImplementedError
+
     if args.benchmark:
         torch.backends.cudnn.benchmark = True
 
@@ -330,16 +331,6 @@ class PromptDataset(Dataset):
         return example
 
 
-def get_full_repo_name(model_id: str, organization: Optional[str] = None, token: Optional[str] = None):
-    if token is None:
-        token = HfFolder.get_token()
-    if organization is None:
-        username = whoami(token)["name"]
-        return f"{username}/{model_id}"
-    else:
-        return f"{organization}/{model_id}"
-
-
 def main(args):
     logging_dir = Path(args.output_dir, args.logging_dir)
 
@@ -406,19 +397,7 @@ def main(args):
 
     # Handle the repository creation
     if accelerator.is_main_process:
-        if args.push_to_hub:
-            if args.hub_model_id is None:
-                repo_name = get_full_repo_name(Path(args.output_dir).name, token=args.hub_token)
-            else:
-                repo_name = args.hub_model_id
-            repo = Repository(args.output_dir, clone_from=repo_name)
-
-            with open(os.path.join(args.output_dir, ".gitignore"), "w+") as gitignore:
-                if "step_*" not in gitignore:
-                    gitignore.write("step_*\n")
-                if "epoch_*" not in gitignore:
-                    gitignore.write("epoch_*\n")
-        elif args.output_dir is not None:
+        if args.output_dir is not None:
             os.makedirs(args.output_dir, exist_ok=True)
 
     # Load the tokenizer
@@ -678,9 +657,6 @@ def main(args):
             revision=args.revision,
         )
         pipeline.save_pretrained(args.output_dir)
-
-        if args.push_to_hub:
-            repo.push_to_hub(commit_message="End of training", blocking=False, auto_lfs_prune=True)
 
     accelerator.end_training()
 
