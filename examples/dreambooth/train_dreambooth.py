@@ -206,6 +206,7 @@ def parse_args(input_args=None):
         "--pin_memory", action="store_true", help="Whether or not to set pin_memory=True in Dataloader."
     )
     parser.add_argument("--benchmark", action="store_true", help="Whether or not to enable cudnn benchmark.")
+    parser.add_argument("--num_workers", type=int, default=1, help="Number of workers in Dataloader")
 
     if input_args is not None:
         args = parser.parse_args(input_args)
@@ -527,8 +528,8 @@ def main(args):
         train_dataset,
         batch_size=args.train_batch_size,
         shuffle=True,
+        num_workers=args.num_workers,
         collate_fn=collate_fn,
-        num_workers=1,
         pin_memory=args.pin_memory,
     )
 
