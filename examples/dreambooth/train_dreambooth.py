@@ -206,6 +206,12 @@ def parse_args(input_args=None):
     parser.add_argument("--benchmark", action="store_true", help="Whether or not to enable cudnn benchmark.")
     parser.add_argument("--num_workers", type=int, default=1, help="Number of workers in Dataloader")
     parser.add_argument("--hflip", action="store_true", help="Apply horizontal flip data augmentation.")
+    parser.add_argument(
+        "--no_clip_grad_norm",
+        action="store_false",
+        help="Skip gradient clipping.",
+        dest="clip_grad_norm",
+    )
 
     if input_args is not None:
         args = parser.parse_args(input_args)
@@ -628,7 +634,7 @@ def main(args):
                     loss = F.mse_loss(noise_pred.float(), noise.float(), reduction="mean")
 
                 accelerator.backward(loss)
-                if accelerator.sync_gradients:
+                if args.clip_grad_norm and accelerator.sync_gradients:
                     params_to_clip = (
                         itertools.chain(unet.parameters(), text_encoder.parameters())
                         if args.train_text_encoder
