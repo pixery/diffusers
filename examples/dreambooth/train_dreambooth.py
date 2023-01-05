@@ -747,6 +747,7 @@ def main(args):
                 subfolder=None if args.pretrained_vae_name_or_path else "vae",
                 revision=None if args.pretrained_vae_name_or_path else args.revision,
             ),
+            safety_checker=None,
             revision=args.revision,
         )
         pipeline.save_pretrained(args.output_dir)
