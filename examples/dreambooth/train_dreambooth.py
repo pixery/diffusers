@@ -205,6 +205,7 @@ def parse_args(input_args=None):
     )
     parser.add_argument("--benchmark", action="store_true", help="Whether or not to enable cudnn benchmark.")
     parser.add_argument("--num_workers", type=int, default=1, help="Number of workers in Dataloader")
+    parser.add_argument("--hflip", action="store_true", help="Apply horizontal flip data augmentation.")
 
     if input_args is not None:
         args = parser.parse_args(input_args)
@@ -250,10 +251,12 @@ class DreamBoothDataset(Dataset):
         class_prompt=None,
         size=512,
         center_crop=False,
+        hflip=False,
     ):
         self.size = size
         self.center_crop = center_crop
         self.tokenizer = tokenizer
+        self.hflip = hflip
 
         self.instance_data_root = Path(instance_data_root)
         if not self.instance_data_root.exists():
@@ -276,6 +279,7 @@ class DreamBoothDataset(Dataset):
 
         self.image_transforms = transforms.Compose(
             [
+                transforms.RandomHorizontalFlip(0.5 * hflip),
                 transforms.Resize(size, interpolation=transforms.InterpolationMode.BILINEAR),
                 transforms.CenterCrop(size) if center_crop else transforms.RandomCrop(size),
                 transforms.ToTensor(),
@@ -478,6 +482,7 @@ def main(args):
         tokenizer=tokenizer,
         size=args.resolution,
         center_crop=args.center_crop,
+        hflip=args.hflip,
     )
 
     def collate_fn(examples):
