@@ -1,6 +1,7 @@
 import argparse
 import hashlib
 import itertools
+import json
 import math
 import os
 from contextlib import nullcontext
@@ -14,7 +15,7 @@ from torch.utils.data import Dataset
 from accelerate import Accelerator
 from accelerate.logging import get_logger
 from accelerate.utils import set_seed
-from diffusers import AutoencoderKL, DDPMScheduler, StableDiffusionPipeline, UNet2DConditionModel
+from diffusers import AutoencoderKL, DDIMScheduler, DDPMScheduler, StableDiffusionPipeline, UNet2DConditionModel
 from diffusers.optimization import get_scheduler
 from PIL import Image
 from torchvision import transforms
@@ -209,10 +210,7 @@ def parse_args(input_args=None):
     parser.add_argument("--num_workers", type=int, default=1, help="Number of workers in Dataloader")
     parser.add_argument("--hflip", action="store_true", help="Apply horizontal flip data augmentation.")
     parser.add_argument(
-        "--no_clip_grad_norm",
-        action="store_false",
-        help="Skip gradient clipping.",
-        dest="clip_grad_norm",
+        "--no_clip_grad_norm", action="store_false", help="Skip gradient clipping.", dest="clip_grad_norm"
     )
     parser.add_argument(
         "--pretrained_vae_name_or_path",
@@ -223,6 +221,23 @@ def parse_args(input_args=None):
     parser.add_argument("--log_interval", type=int, default=10, help="Log every N steps.")
     parser.add_argument("--cache_latents", action="store_true", help="Do not precompute and cache latents from VAE.")
     parser.add_argument("--save_min_steps", type=int, default=0, help="Start saving weights after N steps.")
+    parser.add_argument(
+        "--save_half_precision", action="store_true", help="Whether or not to save checkpoints at fp16."
+    )
+    parser.add_argument(
+        "--save_sample_prompt", type=str, default=None, help="The prompt used to generate sample outputs to save."
+    )
+    parser.add_argument(
+        "--save_sample_negative_prompt",
+        type=str,
+        default=None,
+        help="The negative prompt used to generate sample outputs to save.",
+    )
+    parser.add_argument("--save_guidance_scale", type=float, default=7.5, help="CFG for save sample.")
+    parser.add_argument(
+        "--save_infer_steps", type=int, default=50, help="The number of inference steps for save sample."
+    )
+    parser.add_argument("--n_save_sample", type=int, default=4, help="The number of samples to save.")
 
     if input_args is not None:
         args = parser.parse_args(input_args)
@@ -650,6 +665,65 @@ def main(args):
     logger.info(f"  Total train batch size (w. parallel, distributed & accumulation) = {total_batch_size}")
     logger.info(f"  Gradient Accumulation steps = {args.gradient_accumulation_steps}")
     logger.info(f"  Total optimization steps = {args.max_train_steps}")
+
+    def save_weights(step):
+        # Create the pipeline using using the trained modules and save it.
+        if accelerator.is_main_process:
+            if args.train_text_encoder:
+                text_enc_model = accelerator.unwrap_model(text_encoder)
+            else:
+                text_enc_model = CLIPTextModel.from_pretrained(
+                    args.pretrained_model_name_or_path, subfolder="text_encoder", revision=args.revision
+                )
+            scheduler = DDIMScheduler(
+                beta_start=0.00085,
+                beta_end=0.012,
+                beta_schedule="scaled_linear",
+                clip_sample=False,
+                set_alpha_to_one=False,
+            )
+            torch_dtype = torch.float16 if args.save_half_precision else torch.float32
+            pipeline = StableDiffusionPipeline.from_pretrained(
+                args.pretrained_model_name_or_path,
+                unet=accelerator.unwrap_model(unet),
+                text_encoder=text_enc_model,
+                vae=AutoencoderKL.from_pretrained(
+                    args.pretrained_vae_name_or_path or args.pretrained_model_name_or_path,
+                    subfolder=None if args.pretrained_vae_name_or_path else "vae",
+                    revision=None if args.pretrained_vae_name_or_path else args.revision,
+                ),
+                safety_checker=None,
+                scheduler=scheduler,
+                torch_dtype=torch_dtype,
+                revision=args.revision,
+            )
+            save_dir = os.path.join(args.output_dir, f"{step}")
+            pipeline.save_pretrained(save_dir)
+            with open(os.path.join(save_dir, "args.json"), "w") as f:
+                json.dump(args.__dict__, f, indent=2)
+
+            if args.save_sample_prompt is not None:
+                inference_context = nullcontext() if args.save_half_precision else torch.autocast("cuda")
+                pipeline = pipeline.to(accelerator.device)
+                g_cuda = torch.Generator(device=accelerator.device).manual_seed(args.seed)
+                pipeline.set_progress_bar_config(disable=True)
+                sample_dir = os.path.join(save_dir, "samples")
+                os.makedirs(sample_dir, exist_ok=True)
+                with inference_context, torch.inference_mode():
+                    for i in tqdm(range(args.n_save_sample), desc="Generating samples"):
+                        images = pipeline(
+                            args.save_sample_prompt,
+                            negative_prompt=args.save_sample_negative_prompt,
+                            guidance_scale=args.save_guidance_scale,
+                            num_inference_steps=args.save_infer_steps,
+                            generator=g_cuda,
+                        ).images
+                        images[0].save(os.path.join(sample_dir, f"{i}.png"))
+                del pipeline
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+            print(f"[*] Weights saved at {save_dir}")
+
     # Only show the progress bar once on each machine.
     progress_bar = tqdm(range(args.max_train_steps), disable=not accelerator.is_local_main_process)
     progress_bar.set_description("Steps")
@@ -730,46 +804,18 @@ def main(args):
 
             # Checks if the accelerator has performed an optimization step behind the scenes
             if accelerator.sync_gradients:
+                if global_step > 0 and global_step % args.save_steps == 0 and global_step >= args.save_min_steps:
+                    save_weights(global_step)
+
                 progress_bar.update(1)
                 global_step += 1
-
-                if global_step > 0 and global_step % args.save_steps == 0 and global_step >= args.save_min_steps:
-                    if accelerator.is_main_process:
-                        pipeline = StableDiffusionPipeline.from_pretrained(
-                            args.pretrained_model_name_or_path,
-                            unet=accelerator.unwrap_model(unet),
-                            text_encoder=accelerator.unwrap_model(text_encoder),
-                            vae=AutoencoderKL.from_pretrained(
-                                args.pretrained_vae_name_or_path or args.pretrained_model_name_or_path,
-                                subfolder=None if args.pretrained_vae_name_or_path else "vae",
-                                revision=None if args.pretrained_vae_name_or_path else args.revision,
-                            ),
-                            safety_checker=None,
-                            revision=args.revision,
-                        )
-                        save_path = os.path.join(args.output_dir, f"checkpoint-{global_step}")
-                        pipeline.save_pretrained(save_path)
 
             if global_step >= args.max_train_steps:
                 break
 
         accelerator.wait_for_everyone()
 
-    # Create the pipeline using using the trained modules and save it.
-    if accelerator.is_main_process:
-        pipeline = StableDiffusionPipeline.from_pretrained(
-            args.pretrained_model_name_or_path,
-            unet=accelerator.unwrap_model(unet),
-            text_encoder=accelerator.unwrap_model(text_encoder),
-            vae=AutoencoderKL.from_pretrained(
-                args.pretrained_vae_name_or_path or args.pretrained_model_name_or_path,
-                subfolder=None if args.pretrained_vae_name_or_path else "vae",
-                revision=None if args.pretrained_vae_name_or_path else args.revision,
-            ),
-            safety_checker=None,
-            revision=args.revision,
-        )
-        pipeline.save_pretrained(args.output_dir)
+    save_weights(global_step)
 
     accelerator.end_training()
 
