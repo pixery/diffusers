@@ -213,6 +213,12 @@ def parse_args(input_args=None):
         help="Skip gradient clipping.",
         dest="clip_grad_norm",
     )
+    parser.add_argument(
+        "--pretrained_vae_name_or_path",
+        type=str,
+        default=None,
+        help="Path to pretrained vae or vae identifier from huggingface.co/models.",
+    )
 
     if input_args is not None:
         args = parser.parse_args(input_args)
@@ -374,6 +380,11 @@ def main(args):
             torch_dtype = torch.float16 if accelerator.device.type == "cuda" else torch.float32
             pipeline = StableDiffusionPipeline.from_pretrained(
                 args.pretrained_model_name_or_path,
+                vae=AutoencoderKL.from_pretrained(
+                    args.pretrained_vae_name_or_path or args.pretrained_model_name_or_path,
+                    subfolder=None if args.pretrained_vae_name_or_path else "vae",
+                    revision=None if args.pretrained_vae_name_or_path else args.revision,
+                ),
                 torch_dtype=torch_dtype,
                 safety_checker=None,
                 revision=args.revision,
@@ -669,6 +680,11 @@ def main(args):
             args.pretrained_model_name_or_path,
             unet=accelerator.unwrap_model(unet),
             text_encoder=accelerator.unwrap_model(text_encoder),
+            vae=AutoencoderKL.from_pretrained(
+                args.pretrained_vae_name_or_path or args.pretrained_model_name_or_path,
+                subfolder=None if args.pretrained_vae_name_or_path else "vae",
+                revision=None if args.pretrained_vae_name_or_path else args.revision,
+            ),
             revision=args.revision,
         )
         pipeline.save_pretrained(args.output_dir)
