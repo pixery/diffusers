@@ -123,6 +123,7 @@ def parse_args(input_args=None):
         default=None,
         help="Total number of training steps to perform.  If provided, overrides num_train_epochs.",
     )
+    parser.add_argument("--save_steps", type=int, default=500, help="Save checkpoint every X updates steps.")
     parser.add_argument(
         "--gradient_accumulation_steps",
         type=int,
@@ -221,6 +222,7 @@ def parse_args(input_args=None):
     )
     parser.add_argument("--log_interval", type=int, default=10, help="Log every N steps.")
     parser.add_argument("--cache_latents", action="store_true", help="Do not precompute and cache latents from VAE.")
+    parser.add_argument("--save_min_steps", type=int, default=0, help="Start saving weights after N steps.")
 
     if input_args is not None:
         args = parser.parse_args(input_args)
@@ -730,6 +732,23 @@ def main(args):
             if accelerator.sync_gradients:
                 progress_bar.update(1)
                 global_step += 1
+
+                if global_step > 0 and global_step % args.save_steps == 0 and global_step >= args.save_min_steps:
+                    if accelerator.is_main_process:
+                        pipeline = StableDiffusionPipeline.from_pretrained(
+                            args.pretrained_model_name_or_path,
+                            unet=accelerator.unwrap_model(unet),
+                            text_encoder=accelerator.unwrap_model(text_encoder),
+                            vae=AutoencoderKL.from_pretrained(
+                                args.pretrained_vae_name_or_path or args.pretrained_model_name_or_path,
+                                subfolder=None if args.pretrained_vae_name_or_path else "vae",
+                                revision=None if args.pretrained_vae_name_or_path else args.revision,
+                            ),
+                            safety_checker=None,
+                            revision=args.revision,
+                        )
+                        save_path = os.path.join(args.output_dir, f"checkpoint-{global_step}")
+                        pipeline.save_pretrained(save_path)
 
             if global_step >= args.max_train_steps:
                 break
