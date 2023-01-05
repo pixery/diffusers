@@ -196,6 +196,12 @@ def parse_args(input_args=None):
         ),
     )
     parser.add_argument("--local_rank", type=int, default=-1, help="For distributed training: local_rank")
+    # Changes from shivam's repo:
+    parser.add_argument(
+        "--optimizer_zero_grad_set_to_none",
+        action="store_true",
+        help="Whether or not to set set_to_none=True in optimizer.zero_grad.",
+    )
 
     if input_args is not None:
         args = parser.parse_args(input_args)
@@ -631,7 +637,7 @@ def main(args):
                     accelerator.clip_grad_norm_(params_to_clip, args.max_grad_norm)
                 optimizer.step()
                 lr_scheduler.step()
-                optimizer.zero_grad()
+                optimizer.zero_grad(set_to_none=args.optimizer_zero_grad_set_to_none)
 
             # Checks if the accelerator has performed an optimization step behind the scenes
             if accelerator.sync_gradients:
