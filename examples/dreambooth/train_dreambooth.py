@@ -238,6 +238,9 @@ def parse_args(input_args=None):
         "--save_infer_steps", type=int, default=50, help="The number of inference steps for save sample."
     )
     parser.add_argument("--n_save_sample", type=int, default=4, help="The number of samples to save.")
+    parser.add_argument(
+        "--no_pad_tokens", action="store_false", help="Flag to skip padding tokens to length 77.", dest="pad_tokens"
+    )
 
     if input_args is not None:
         args = parser.parse_args(input_args)
@@ -283,11 +286,13 @@ class DreamBoothDataset(Dataset):
         class_prompt=None,
         size=512,
         center_crop=False,
+        pad_tokens=False,
         hflip=False,
     ):
         self.size = size
         self.center_crop = center_crop
         self.tokenizer = tokenizer
+        self.pad_tokens = pad_tokens
         self.hflip = hflip
 
         self.instance_data_root = Path(instance_data_root)
@@ -330,7 +335,7 @@ class DreamBoothDataset(Dataset):
         example["instance_images"] = self.image_transforms(instance_image)
         example["instance_prompt_ids"] = self.tokenizer(
             self.instance_prompt,
-            padding="do_not_pad",
+            padding="max_length" if self.pad_tokens else "do_not_pad",
             truncation=True,
             max_length=self.tokenizer.model_max_length,
         ).input_ids
@@ -342,7 +347,7 @@ class DreamBoothDataset(Dataset):
             example["class_images"] = self.image_transforms(class_image)
             example["class_prompt_ids"] = self.tokenizer(
                 self.class_prompt,
-                padding="do_not_pad",
+                padding="max_length" if self.pad_tokens else "do_not_pad",
                 truncation=True,
                 max_length=self.tokenizer.model_max_length,
             ).input_ids
@@ -545,6 +550,7 @@ def main(args):
         tokenizer=tokenizer,
         size=args.resolution,
         center_crop=args.center_crop,
+        pad_tokens=args.pad_tokens,
         hflip=args.hflip,
     )
 
@@ -563,8 +569,7 @@ def main(args):
 
         input_ids = tokenizer.pad(
             {"input_ids": input_ids},
-            padding="max_length",
-            max_length=tokenizer.model_max_length,
+            padding=True,
             return_tensors="pt",
         ).input_ids
 
