@@ -40,7 +40,10 @@ def parse_args(input_args=None):
         type=str,
         default=None,
         required=False,
-        help="Revision of pretrained model identifier from huggingface.co/models.",
+        help=(
+            "Revision of pretrained model identifier from huggingface.co/models. Trainable model components should be"
+            " float32 precision."
+        ),
     )
     parser.add_argument(
         "--tokenizer_name",
@@ -110,7 +113,11 @@ def parse_args(input_args=None):
     parser.add_argument(
         "--center_crop", action="store_true", help="Whether to center crop images before resizing to resolution"
     )
-    parser.add_argument("--train_text_encoder", action="store_true", help="Whether to train the text encoder")
+    parser.add_argument(
+        "--train_text_encoder",
+        action="store_true",
+        help="Whether to train the text encoder. If set, the text encoder should be float32 precision.",
+    )
     parser.add_argument(
         "--train_batch_size", type=int, default=4, help="Batch size (per device) for the training dataloader."
     )
@@ -246,6 +253,13 @@ def parse_args(input_args=None):
         args = parser.parse_args(input_args)
     else:
         args = parser.parse_args()
+
+    if args.revision in {"fp16", "bf16"}:
+        low_precision_error_string = (
+            "Please make sure to always have all model weights in full float32 precision when starting training - even"
+            " if doing mixed precision training. copy of the weights should still be float32."
+        )
+        raise ValueError(f"Revision {args.revision} specified. {low_precision_error_string}")
 
     if args.push_to_hub:
         raise NotImplementedError
@@ -638,6 +652,17 @@ def main(args):
         num_warmup_steps=args.lr_warmup_steps * args.gradient_accumulation_steps,
         num_training_steps=args.max_train_steps * args.gradient_accumulation_steps,
     )
+
+    low_precision_error_string = (
+        "Please make sure to always have all model weights in full float32 precision when starting training - even if"
+        " doing mixed precision training. copy of the weights should still be float32."
+    )
+
+    if unet.dtype != torch.float32:
+        raise ValueError(f"Unet loaded as datatype {unet.dtype}. {low_precision_error_string}")
+
+    if args.train_text_encoder and text_encoder.dtype != torch.float32:
+        raise ValueError(f"Text encoder loaded as datatype {text_encoder.dtype}. {low_precision_error_string}")
 
     if args.train_text_encoder:
         unet, text_encoder, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
