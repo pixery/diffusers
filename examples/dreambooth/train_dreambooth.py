@@ -433,7 +433,7 @@ def main(args):
         )
 
     if args.seed is not None:
-        set_seed(args.seed)
+        set_seed(args.seed, device_specific=True)
 
     if args.with_prior_preservation:
         class_images_dir = Path(args.class_data_dir)
