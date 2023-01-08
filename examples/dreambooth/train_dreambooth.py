@@ -1,4 +1,5 @@
 import argparse
+import copy
 import hashlib
 import itertools
 import json
@@ -700,8 +701,9 @@ def main(args):
     def save_weights(step):
         # Create the pipeline using using the trained modules and save it.
         if accelerator.is_main_process:
+            unet_model = accelerator.unwrap_model(unet, keep_fp32_wrapper=True)
             if args.train_text_encoder:
-                text_enc_model = accelerator.unwrap_model(text_encoder)
+                text_enc_model = accelerator.unwrap_model(text_encoder, keep_fp32_wrapper=True)
             else:
                 text_enc_model = CLIPTextModel.from_pretrained(
                     args.pretrained_model_name_or_path, subfolder="text_encoder", revision=args.revision
@@ -714,9 +716,12 @@ def main(args):
                 set_alpha_to_one=False,
             )
             torch_dtype = torch.float16 if args.save_half_precision else torch.float32
+            unet_model = accelerator.unwrap_model(copy.deepcopy(unet_model)).to(torch_dtype)
+            if args.train_text_encoder:
+                text_enc_model = accelerator.unwrap_model(copy.deepcopy(text_enc_model)).to(torch_dtype)
             pipeline = StableDiffusionPipeline.from_pretrained(
                 args.pretrained_model_name_or_path,
-                unet=accelerator.unwrap_model(unet),
+                unet=unet_model,
                 text_encoder=text_enc_model,
                 vae=AutoencoderKL.from_pretrained(
                     args.pretrained_vae_name_or_path or args.pretrained_model_name_or_path,
