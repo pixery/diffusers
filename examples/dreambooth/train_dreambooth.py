@@ -716,9 +716,9 @@ def main(args):
                 set_alpha_to_one=False,
             )
             torch_dtype = torch.float16 if args.save_half_precision else torch.float32
-            unet_model = accelerator.unwrap_model(copy.deepcopy(unet_model)).to(torch_dtype)
-            if args.train_text_encoder:
-                text_enc_model = accelerator.unwrap_model(copy.deepcopy(text_enc_model)).to(torch_dtype)
+            # unet_model = accelerator.unwrap_model(copy.deepcopy(unet_model)).to(torch_dtype)
+            # if args.train_text_encoder:
+            #     text_enc_model = accelerator.unwrap_model(copy.deepcopy(text_enc_model)).to(torch_dtype)
             pipeline = StableDiffusionPipeline.from_pretrained(
                 args.pretrained_model_name_or_path,
                 unet=unet_model,
