@@ -143,26 +143,6 @@ class StableDiffusionUpscalePipeline(DiffusionPipeline):
             if cpu_offloaded_model is not None:
                 cpu_offload(cpu_offloaded_model, device)
 
-    # Copied from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion.StableDiffusionPipeline.enable_xformers_memory_efficient_attention
-    def enable_xformers_memory_efficient_attention(self):
-        r"""
-        Enable memory efficient attention as implemented in xformers.
-
-        When this option is enabled, you should observe lower GPU memory usage and a potential speed up at inference
-        time. Speed up at training time is not guaranteed.
-
-        Warning: When Memory Efficient Attention and Sliced attention are both enabled, the Memory Efficient Attention
-        is used.
-        """
-        self.unet.set_use_memory_efficient_attention_xformers(True)
-
-    # Copied from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion.StableDiffusionPipeline.disable_xformers_memory_efficient_attention
-    def disable_xformers_memory_efficient_attention(self):
-        r"""
-        Disable memory efficient attention as implemented in xformers.
-        """
-        self.unet.set_use_memory_efficient_attention_xformers(False)
-
     @property
     # Copied from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion.StableDiffusionPipeline._execution_device
     def _execution_device(self):
@@ -479,8 +459,10 @@ class StableDiffusionUpscalePipeline(DiffusionPipeline):
         else:
             noise = torch.randn(image.shape, generator=generator, device=device, dtype=text_embeddings.dtype)
         image = self.low_res_scheduler.add_noise(image, noise, noise_level)
-        image = torch.cat([image] * 2) if do_classifier_free_guidance else image
-        noise_level = torch.cat([noise_level] * 2) if do_classifier_free_guidance else noise_level
+
+        batch_multiplier = 2 if do_classifier_free_guidance else 1
+        image = torch.cat([image] * batch_multiplier * num_images_per_prompt)
+        noise_level = torch.cat([noise_level] * image.shape[0])
 
         # 6. Prepare latent variables
         height, width = image.shape[2:]
@@ -535,7 +517,7 @@ class StableDiffusionUpscalePipeline(DiffusionPipeline):
                 latents = self.scheduler.step(noise_pred, t, latents, **extra_step_kwargs).prev_sample
 
                 # call the callback, if provided
-                if (i + 1) > num_warmup_steps and (i + 1) % self.scheduler.order == 0:
+                if i == len(timesteps) - 1 or ((i + 1) > num_warmup_steps and (i + 1) % self.scheduler.order == 0):
                     progress_bar.update()
                     if callback is not None and i % callback_steps == 0:
                         callback(i, t, latents)
