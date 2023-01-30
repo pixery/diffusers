@@ -19,6 +19,7 @@ from accelerate.logging import get_logger
 from accelerate.utils import set_seed
 from diffusers import AutoencoderKL, DDIMScheduler, DDPMScheduler, DiffusionPipeline, UNet2DConditionModel
 from diffusers.optimization import get_scheduler
+from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion_depth2img import StableDiffusionDepth2ImgPipeline
 from diffusers.utils import check_min_version
 from diffusers.utils.import_utils import is_xformers_available
 from PIL import Image
@@ -337,6 +338,10 @@ def parse_args(input_args=None):
     return args
 
 
+def get_depth_image_path(normal_image_path):
+    return normal_image_path.parent / f"{normal_image_path.stem}_depth.png"
+
+
 class DreamBoothDataset(Dataset):
     """
     A dataset to prepare the instance and class images with the prompts for fine-tuning the model.
@@ -348,6 +353,7 @@ class DreamBoothDataset(Dataset):
         instance_data_root,
         instance_prompt,
         tokenizer,
+        vae_scale_factor,
         class_data_root=None,
         class_prompt=None,
         size=512,
@@ -358,6 +364,7 @@ class DreamBoothDataset(Dataset):
         self.size = size
         self.center_crop = center_crop
         self.tokenizer = tokenizer
+        self.vae_scale_factor = vae_scale_factor
         self.pad_tokens = pad_tokens
         self.hflip = hflip
 
@@ -365,7 +372,9 @@ class DreamBoothDataset(Dataset):
         if not self.instance_data_root.exists():
             raise ValueError("Instance images root doesn't exists.")
 
-        self.instance_images_path = list(Path(instance_data_root).iterdir())
+        self.instance_images_path = list(
+            filter(lambda path: str(path).find("_depth.") == -1, self.instance_data_root.iterdir())
+        )
         self.num_instance_images = len(self.instance_images_path)
         self.instance_prompt = instance_prompt
         self._length = self.num_instance_images
@@ -373,7 +382,9 @@ class DreamBoothDataset(Dataset):
         if class_data_root is not None:
             self.class_data_root = Path(class_data_root)
             self.class_data_root.mkdir(parents=True, exist_ok=True)
-            self.class_images_path = list(self.class_data_root.iterdir())
+            self.class_images_path = list(
+                filter(lambda path: str(path).find("_depth.") == -1, self.class_data_root.iterdir())
+            )
             self.num_class_images = len(self.class_images_path)
             self._length = max(self.num_class_images, self.num_instance_images)
             self.class_prompt = class_prompt
@@ -390,15 +401,26 @@ class DreamBoothDataset(Dataset):
             ]
         )
 
+        self.depth_image_transforms = transforms.Compose(
+            [
+                transforms.Resize(size // self.vae_scale_factor, interpolation=transforms.InterpolationMode.BILINEAR),
+                transforms.ToTensor(),
+            ]
+        )
+
     def __len__(self):
         return self._length
 
     def __getitem__(self, index):
         example = {}
-        instance_image = Image.open(self.instance_images_path[index % self.num_instance_images])
+        instance_image_path = self.instance_images_path[index % self.num_instance_images]
+        instance_depth_image_path = get_depth_image_path(instance_image_path)
+        instance_image = Image.open(instance_image_path)
+        instance_depth_image = Image.open(instance_depth_image_path)
         if not instance_image.mode == "RGB":
             instance_image = instance_image.convert("RGB")
         example["instance_images"] = self.image_transforms(instance_image)
+        example["instance_depth_images"] = self.depth_image_transforms(instance_depth_image)
         example["instance_prompt_ids"] = self.tokenizer(
             self.instance_prompt,
             padding="max_length" if self.pad_tokens else "do_not_pad",
@@ -407,10 +429,14 @@ class DreamBoothDataset(Dataset):
         ).input_ids
 
         if self.class_data_root:
-            class_image = Image.open(self.class_images_path[index % self.num_class_images])
+            class_image_path = self.class_images_path[index % self.num_class_images]
+            class_depth_image_path = get_depth_image_path(class_image_path)
+            class_image = Image.open(class_image_path)
+            class_depth_image = Image.open(class_depth_image_path)
             if not class_image.mode == "RGB":
                 class_image = class_image.convert("RGB")
             example["class_images"] = self.image_transforms(class_image)
+            example["class_depth_images"] = self.depth_image_transforms(class_depth_image)
             example["class_prompt_ids"] = self.tokenizer(
                 self.class_prompt,
                 padding="max_length" if self.pad_tokens else "do_not_pad",
@@ -424,15 +450,20 @@ class DreamBoothDataset(Dataset):
 def collate_fn(examples, with_prior_preservation=False, *, tokenizer):
     input_ids = [example["instance_prompt_ids"] for example in examples]
     pixel_values = [example["instance_images"] for example in examples]
+    depth_values = [example["instance_depth_images"] for example in examples]
 
     # Concat class and instance examples for prior preservation.
     # We do this to avoid doing two forward passes.
     if with_prior_preservation:
         input_ids += [example["class_prompt_ids"] for example in examples]
         pixel_values += [example["class_images"] for example in examples]
+        depth_values += [example["class_depth_images"] for example in examples]
 
     pixel_values = torch.stack(pixel_values)
     pixel_values = pixel_values.to(memory_format=torch.contiguous_format).float()
+
+    depth_values = torch.stack(depth_values)
+    depth_values = depth_values.to(memory_format=torch.contiguous_format).float()
 
     input_ids = tokenizer.pad(
         {"input_ids": input_ids},
@@ -443,6 +474,7 @@ def collate_fn(examples, with_prior_preservation=False, *, tokenizer):
     batch = {
         "input_ids": input_ids,
         "pixel_values": pixel_values,
+        "depth_values": depth_values,
     }
     return batch
 
@@ -488,6 +520,42 @@ class AverageMeter:
         self.sum += val * n
         self.count += n
         self.avg = self.sum / self.count
+
+
+def get_components_from_pipeline(model_name_or_path):
+    pipeline = StableDiffusionDepth2ImgPipeline.from_pretrained("stabilityai/stable-diffusion-2-depth")
+    return pipeline.feature_extractor, pipeline.depth_estimator
+
+
+def create_depth_images(paths, pretrained_model_name_or_path, accelerator, unet, text_encoder):
+    pipeline = DiffusionPipeline.from_pretrained(
+        pretrained_model_name_or_path,
+        unet=accelerator.unwrap_model(unet),
+        text_encoder=accelerator.unwrap_model(text_encoder),
+        revision=args.revision,
+    )
+    pipeline.to("cuda")
+    for path in paths:
+        print(f"For each image in {path}, creating a depth image.")
+        path_iterator = Path(path).iterdir()
+        non_depth_image_files = list(filter(lambda path: str(path).find("_depth.") == -1, path_iterator))
+        for image_path in tqdm(non_depth_image_files):
+            depth_path = get_depth_image_path(image_path)
+            if depth_path.exists():
+                continue
+            image_instance = Image.open(image_path)
+            if not image_instance.mode == "RGB":
+                image_instance = image_instance.convert("RGB")
+            image_instance = pipeline.feature_extractor(image_instance, return_tensors="pt").pixel_values
+            image_instance = image_instance.to("cuda")
+            depth_map = pipeline.depth_estimator(image_instance).predicted_depth
+            depth_min = torch.amin(depth_map, dim=[0, 1, 2], keepdim=True)
+            depth_max = torch.amax(depth_map, dim=[0, 1, 2], keepdim=True)
+            depth_map = 2.0 * (depth_map - depth_min) / (depth_max - depth_min) - 1.0
+            depth_map = depth_map[0, :, :]
+            depth_map_image = transforms.ToPILImage()(depth_map)
+            depth_map_image.save(depth_path)
+    return 2 ** (len(pipeline.vae.config.block_out_channels) - 1)
 
 
 def main(args):
@@ -599,6 +667,7 @@ def main(args):
         subfolder="unet",
         revision=args.revision,
     )
+    feature_extractor, depth_estimator = get_components_from_pipeline(args.pretrained_model_name_or_path)
 
     if is_xformers_available():
         try:
@@ -649,12 +718,20 @@ def main(args):
 
     noise_scheduler = DDPMScheduler.from_pretrained(args.pretrained_model_name_or_path, subfolder="scheduler")
 
+    vae_scale_factor = create_depth_images(
+        [args.instance_data_dir, args.class_data_dir],
+        args.pretrained_model_name_or_path,
+        accelerator,
+        unet,
+        text_encoder,
+    )
     train_dataset = DreamBoothDataset(
         instance_data_root=args.instance_data_dir,
         instance_prompt=args.instance_prompt,
+        tokenizer=tokenizer,
+        vae_scale_factor=vae_scale_factor,
         class_data_root=args.class_data_dir if args.with_prior_preservation else None,
         class_prompt=args.class_prompt,
-        tokenizer=tokenizer,
         size=args.resolution,
         center_crop=args.center_crop,
         pad_tokens=args.pad_tokens,
@@ -857,6 +934,9 @@ def main(args):
                 # Add noise to the latents according to the noise magnitude at each timestep
                 # (this is the forward diffusion process)
                 noisy_latents = noise_scheduler.add_noise(latents, noise, timesteps)
+
+                # Brian: do we add noise to depth or not? I think no
+                noisy_latents = torch.cat([noisy_latents, batch["depth_values"]], dim=1)
 
                 # Get the text embedding for conditioning
                 with text_enc_context:
