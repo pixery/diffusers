@@ -64,6 +64,13 @@ def parse_args(input_args=None):
         help="Path to pretrained model or model identifier from huggingface.co/models.",
     )
     parser.add_argument(
+        "--pretrained_txt2img_model_name_or_path",
+        type=str,
+        default=None,
+        required=True,
+        help="Path to pretrained model or model identifier from huggingface.co/models. This model will be used to generate images from text, without depth conditioning, for generating sample images.",
+    )
+    parser.add_argument(
         "--revision",
         type=str,
         default=None,
@@ -485,6 +492,7 @@ class PromptDataset(Dataset):
     def __init__(self, prompt, num_samples):
         self.prompt = prompt
         self.num_samples = num_samples
+        print(f'Creating prompt dataset with prompt={prompt} and num_samples={num_samples}')
 
     def __len__(self):
         return self.num_samples
@@ -589,9 +597,9 @@ def main(args):
         if cur_class_images < args.num_class_images:
             torch_dtype = torch.float16 if accelerator.device.type == "cuda" else torch.float32
             pipeline = DiffusionPipeline.from_pretrained(
-                args.pretrained_model_name_or_path,
+                args.pretrained_txt2img_model_name_or_path,
                 vae=AutoencoderKL.from_pretrained(
-                    args.pretrained_vae_name_or_path or args.pretrained_model_name_or_path,
+                    args.pretrained_vae_name_or_path or args.pretrained_txt2img_model_name_or_path,
                     subfolder=None if args.pretrained_vae_name_or_path else "vae",
                     revision=None if args.pretrained_vae_name_or_path else args.revision,
                     torch_dtype=torch_dtype,
