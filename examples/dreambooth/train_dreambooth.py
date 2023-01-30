@@ -159,6 +159,24 @@ def parse_args(input_args=None):
     )
     parser.add_argument("--save_steps", type=int, default=500, help="Save checkpoint every X updates steps.")
     parser.add_argument(
+        "--checkpointing_steps",
+        type=int,
+        default=0,
+        help=(
+            "Save a checkpoint of the training state every X updates. These checkpoints are only suitable for resuming"
+            " training using `--resume_from_checkpoint`."
+        ),
+    )
+    parser.add_argument(
+        "--resume_from_checkpoint",
+        type=str,
+        default=None,
+        help=(
+            "Whether training should be resumed from a previous checkpoint. Use a path saved by"
+            ' `--checkpointing_steps`, or `"latest"` to automatically select the last available checkpoint.'
+        ),
+    )
+    parser.add_argument(
         "--gradient_accumulation_steps",
         type=int,
         default=1,
@@ -286,6 +304,12 @@ def parse_args(input_args=None):
             " if doing mixed precision training. copy of the weights should still be float32."
         )
         raise ValueError(f"Revision {args.revision} specified. {low_precision_error_string}")
+
+    if args.checkpointing_steps:
+        raise NotImplementedError
+
+    if args.resume_from_checkpoint:
+        raise NotImplementedError
 
     if args.push_to_hub:
         raise NotImplementedError
