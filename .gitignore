@@ -1,3 +1,6 @@
+inputs/
+outputs/
+
 # Initially taken from Github's Python gitignore file
 
 # Byte-compiled / optimized / DLL files
@@ -121,9 +124,9 @@ dmypy.json
 # Pyre type checker
 .pyre/
 
-# vscode
-.vs
-.vscode
+# # vscode
+# .vs
+# .vscode
 
 # Pycharm
 .idea
