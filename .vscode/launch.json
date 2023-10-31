@@ -42,7 +42,7 @@
                 // "--mixed_precision=fp16",
                 "--prior_generation_precision=bf16",
                 // "--prior_generation_precision=fp16",
-                "--enable_xformers_memory_efficient_attention",
+                // "--enable_xformers_memory_efficient_attention",
                 "--rank=32",
             ]
         },
