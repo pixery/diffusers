@@ -17,6 +17,7 @@ import argparse
 import gc
 import hashlib
 import itertools
+import json
 import logging
 import math
 import os
@@ -28,23 +29,16 @@ from typing import Dict
 import torch
 import torch.nn.functional as F
 import torch.utils.checkpoint
+from torch.utils.data import Dataset
+
+import diffusers
 import transformers
 from accelerate import Accelerator
 from accelerate.logging import get_logger
 from accelerate.utils import set_seed
-from packaging import version
-from PIL import Image
-from PIL.ImageOps import exif_transpose
-from torch.utils.data import Dataset
-from torchvision import transforms
-from tqdm.auto import tqdm
-from transformers import AutoTokenizer, PretrainedConfig
-
-import diffusers
 from diffusers import (
     AutoencoderKL,
     DDPMScheduler,
-    DPMSolverMultistepScheduler,
     StableDiffusionXLPipeline,
     UNet2DConditionModel,
 )
@@ -53,6 +47,15 @@ from diffusers.models.attention_processor import LoRAAttnProcessor, LoRAAttnProc
 from diffusers.optimization import get_scheduler
 from diffusers.utils import check_min_version
 from diffusers.utils.import_utils import is_xformers_available
+from packaging import version
+from PIL import Image
+from PIL.ImageOps import exif_transpose
+from torchvision import transforms
+from tqdm.auto import tqdm
+from transformers import AutoTokenizer, PretrainedConfig
+
+from diffusers_utils.compel import infer_compel, load_compels
+from diffusers_utils.schedulers import get_diffusers_scheduler
 
 
 # Will error if the minimal version of diffusers is not installed. Remove at your own risks.
@@ -134,7 +137,7 @@ def parse_args(input_args=None):
         "--validation_prompt",
         type=str,
         default=None,
-        help="A prompt that is used during validation to verify that the model is learning.",
+        help="[DEPRECATED] A prompt that is used during validation to verify that the model is learning.",
     )
     parser.add_argument(
         "--num_validation_images",
@@ -147,8 +150,8 @@ def parse_args(input_args=None):
         type=int,
         default=50,
         help=(
-            "Run dreambooth validation every X epochs. Dreambooth validation consists of running the prompt"
-            " `args.validation_prompt` multiple times: `args.num_validation_images`."
+            "[DEPRECATED] Run dreambooth validation every X epochs. Dreambooth validation consists of running the"
+            " prompt `args.validation_prompt` multiple times: `args.num_validation_images`."
         ),
     )
     parser.add_argument(
@@ -370,6 +373,33 @@ def parse_args(input_args=None):
         default=4,
         help=("The dimension of the LoRA update matrices."),
     )
+    parser.add_argument(
+        "--validation_prompts_path",
+        type=str,
+        default=None,
+        help="Prompts that are used during validation to verify that the model is learning.",
+    )
+    parser.add_argument(
+        "--validation_steps",
+        type=int,
+        default=50,
+        help=(
+            "Run dreambooth validation every X steps. Dreambooth validation consists of running the prompt(s) from"
+            " `args.validation_prompts_path` multiple times: `args.num_validation_images`."
+        ),
+    )
+    parser.add_argument(
+        "--validation_min_steps",
+        type=int,
+        default=None,
+        help="Number of steps strictly before the completion of which no validation should be performed.",
+    )
+    parser.add_argument(
+        "--checkpointing_min_steps",
+        type=int,
+        default=None,
+        help="Number of steps strictly before the completion of which no checkpointing should be performed.",
+    )
 
     if input_args is not None:
         args = parser.parse_args(input_args)
@@ -379,6 +409,12 @@ def parse_args(input_args=None):
     if args.revision is not None:
         warnings.warn("--revision is ill defined in the current implementation, and is ignored.")
         args.revision = None
+
+    if args.validation_prompt is not None:
+        warnings.warn("--validation_prompt is deprecated; use --validation_prompts_path.")
+
+    if args.validation_epochs != 50:
+        warnings.warn("--validation_epochs is deprecated; use --validation_steps.")
 
     if args.push_to_hub or args.hub_token is not None or args.hub_model_id is not None:
         warnings.warn("huggingface hub functionality is disabled.")
@@ -651,10 +687,16 @@ def main(args):
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
 
-    # Handle the repository creation
+    # Handle the output dir creation
     if accelerator.is_main_process:
         if args.output_dir is not None:
             os.makedirs(args.output_dir, exist_ok=True)
+
+        validation_root_dir = Path(args.output_dir, "val_images")
+        validation_root_dir.mkdir(parents=True, exist_ok=True)
+
+        checkpoints_dir = Path(args.output_dir, "checkpoints")
+        checkpoints_dir.mkdir(exist_ok=True)
 
     # Load the tokenizers
     tokenizer_one = AutoTokenizer.from_pretrained(
@@ -990,7 +1032,15 @@ def main(args):
     args.num_train_epochs = math.ceil(args.max_train_steps / num_update_steps_per_epoch)
 
     if accelerator.is_main_process:
-        pass
+        if args.validation_prompts_path:
+            with open(args.validation_prompts_path) as f:
+                validation_configs = json.load(f)
+            if args.seed:
+                generator = torch.Generator()
+                generator.manual_seed(args.seed)
+                validation_seeds = torch.randint(
+                    2**31, (args.num_validation_images,), generator=generator, dtype=torch.int32
+                ).tolist()
 
     # Train!
     total_batch_size = args.train_batch_size * accelerator.num_processes * args.gradient_accumulation_steps
@@ -1012,7 +1062,7 @@ def main(args):
             path = os.path.basename(args.resume_from_checkpoint)
         else:
             # Get the mos recent checkpoint
-            dirs = os.listdir(args.output_dir)
+            dirs = os.listdir(checkpoints_dir)
             dirs = [d for d in dirs if d.startswith("checkpoint")]
             dirs = sorted(dirs, key=lambda x: int(x.split("-")[1]))
             path = dirs[-1] if len(dirs) > 0 else None
@@ -1024,7 +1074,7 @@ def main(args):
             args.resume_from_checkpoint = None
         else:
             accelerator.print(f"Resuming from checkpoint {path}")
-            accelerator.load_state(os.path.join(args.output_dir, path))
+            accelerator.load_state(os.path.join(checkpoints_dir, path))
             global_step = int(path.split("-")[1])
 
             resume_global_step = global_step * args.gradient_accumulation_steps
@@ -1144,10 +1194,13 @@ def main(args):
                 global_step += 1
 
                 if accelerator.is_main_process:
-                    if global_step % args.checkpointing_steps == 0:
+                    if (
+                        global_step >= (args.checkpointing_min_steps or 1)
+                        and global_step % args.checkpointing_steps == 0
+                    ):
                         # _before_ saving state, check if this save would set us over the `checkpoints_total_limit`
                         if args.checkpoints_total_limit is not None:
-                            checkpoints = os.listdir(args.output_dir)
+                            checkpoints = os.listdir(checkpoints_dir)
                             checkpoints = [d for d in checkpoints if d.startswith("checkpoint")]
                             checkpoints = sorted(checkpoints, key=lambda x: int(x.split("-")[1]))
 
@@ -1162,75 +1215,133 @@ def main(args):
                                 logger.info(f"removing checkpoints: {', '.join(removing_checkpoints)}")
 
                                 for removing_checkpoint in removing_checkpoints:
-                                    removing_checkpoint = os.path.join(args.output_dir, removing_checkpoint)
+                                    removing_checkpoint = os.path.join(checkpoints_dir, removing_checkpoint)
                                     shutil.rmtree(removing_checkpoint)
 
-                        save_path = os.path.join(args.output_dir, f"checkpoint-{global_step}")
+                        save_path = os.path.join(checkpoints_dir, f"checkpoint-{global_step}")
                         accelerator.save_state(save_path)
                         logger.info(f"Saved state to {save_path}")
+
+                    if (
+                        args.validation_prompts_path
+                        and global_step >= (args.validation_min_steps or 1)
+                        and global_step % args.validation_steps == 0
+                    ):
+                        logger.info(
+                            f"Running validation... \n Generating {args.num_validation_images} images with prompt(s)"
+                            f" from: {args.validation_prompts_path}."
+                        )
+                        # create pipeline
+                        if not args.train_text_encoder:
+                            text_encoder_one = text_encoder_cls_one.from_pretrained(
+                                args.pretrained_model_name_or_path, subfolder="text_encoder", revision=args.revision
+                            )
+                            text_encoder_two = text_encoder_cls_two.from_pretrained(
+                                args.pretrained_model_name_or_path, subfolder="text_encoder_2", revision=args.revision
+                            )
+                        pipeline = StableDiffusionXLPipeline.from_pretrained(
+                            args.pretrained_model_name_or_path,
+                            vae=vae,
+                            text_encoder=accelerator.unwrap_model(text_encoder_one),
+                            text_encoder_2=accelerator.unwrap_model(text_encoder_two),
+                            unet=accelerator.unwrap_model(unet),
+                            revision=args.revision,
+                            torch_dtype=weight_dtype,
+                        )
+
+                        pipeline = pipeline.to(accelerator.device)
+                        pipeline.set_progress_bar_config(disable=True)
+
+                        compel_1, compel_2 = load_compels(pipeline)
+
+                        validation_root_dir_by_step = validation_root_dir / "by_step"
+                        if args.seed:
+                            validation_root_dir_by_seed = validation_root_dir / "by_seed"
+
+                        # run inference
+                        for prompt_idx, validation_config in enumerate(validation_configs):
+                            # We train on the simplified learning objective.
+                            # If we were previously predicting a variance, we need the scheduler to ignore it
+                            assert validation_config["ignore_variance"]
+                            scheduler = get_diffusers_scheduler(
+                                validation_config["scheduler"],
+                                pipeline=pipeline,
+                                ignore_variance=validation_config["ignore_variance"],
+                            )
+                            pipeline.scheduler = scheduler
+                            if not args.seed:
+                                with torch.cuda.amp.autocast():
+                                    images = [
+                                        infer_compel(
+                                            pipe=pipeline,
+                                            compel_1=compel_1,
+                                            compel_2=compel_2,
+                                            prompt=validation_config["prompt"],
+                                            neg_prompt=validation_config["negative_prompt"],
+                                            prompt_2=validation_config["prompt_2"],
+                                            neg_prompt_2=validation_config["negative_prompt_2"],
+                                            num_inference_steps=validation_config["num_inference_steps"],
+                                            guidance_scale=validation_config["guidance_scale"],
+                                        )
+                                        for _ in range(args.num_validation_images)
+                                    ]
+                            else:
+                                images = []
+                                for val_seed in validation_seeds:
+                                    generator = torch.Generator(device=accelerator.device).manual_seed(val_seed)
+                                    with torch.cuda.amp.autocast():
+                                        images.append(
+                                            infer_compel(
+                                                pipe=pipeline,
+                                                compel_1=compel_1,
+                                                compel_2=compel_2,
+                                                prompt=validation_config["prompt"],
+                                                neg_prompt=validation_config["negative_prompt"],
+                                                prompt_2=validation_config["prompt_2"],
+                                                neg_prompt_2=validation_config["negative_prompt_2"],
+                                                num_inference_steps=validation_config["num_inference_steps"],
+                                                guidance_scale=validation_config["guidance_scale"],
+                                                generator=generator,
+                                            )
+                                        )
+
+                            validation_parent_dir_by_step = validation_root_dir_by_step / f"prompt_{prompt_idx:02d}"
+                            validation_parent_dir_by_step.mkdir(parents=True, exist_ok=True)
+                            if args.seed:
+                                validation_parent_dir_by_seed = (
+                                    validation_root_dir_by_seed / f"prompt_{prompt_idx:02d}"
+                                )
+                                validation_parent_dir_by_seed.mkdir(parents=True, exist_ok=True)
+                            for val_idx, val_image in (
+                                enumerate(images) if not args.seed else zip(validation_seeds, images)
+                            ):
+                                # save by step
+                                validation_dir_by_step = validation_parent_dir_by_step / f"{global_step:05d}"
+                                validation_dir_by_step.mkdir(exist_ok=True)
+                                save_prefix = "output" if not args.seed else "output_seed"
+                                save_postfix = f"{val_idx:02d}" if not args.seed else f"{val_idx:010d}"
+                                save_name = f"{save_prefix}_{save_postfix}.png"
+                                save_path = validation_dir_by_step / save_name
+                                val_image.save(save_path)
+                                # save by seed
+                                if args.seed:
+                                    validation_dir_by_seed = validation_parent_dir_by_seed / f"{val_idx:010d}"
+                                    validation_dir_by_seed.mkdir(exist_ok=True)
+                                    save_prefix = "output_step"
+                                    save_postfix = f"{global_step:05d}"
+                                    save_name = f"{save_prefix}_{save_postfix}.png"
+                                    save_path = validation_dir_by_seed / save_name
+                                    val_image.save(save_path)
+
+                        del pipeline
+                        del compel_1, compel_2
+                        torch.cuda.empty_cache()
 
             logs = {"loss": loss.detach().item(), "lr": lr_scheduler.get_last_lr()[0]}
             progress_bar.set_postfix(**logs)
 
             if global_step >= args.max_train_steps:
                 break
-
-        if accelerator.is_main_process:
-            if args.validation_prompt is not None and epoch % args.validation_epochs == 0:
-                logger.info(
-                    f"Running validation... \n Generating {args.num_validation_images} images with prompt:"
-                    f" {args.validation_prompt}."
-                )
-                # create pipeline
-                if not args.train_text_encoder:
-                    text_encoder_one = text_encoder_cls_one.from_pretrained(
-                        args.pretrained_model_name_or_path, subfolder="text_encoder", revision=args.revision
-                    )
-                    text_encoder_two = text_encoder_cls_two.from_pretrained(
-                        args.pretrained_model_name_or_path, subfolder="text_encoder_2", revision=args.revision
-                    )
-                pipeline = StableDiffusionXLPipeline.from_pretrained(
-                    args.pretrained_model_name_or_path,
-                    vae=vae,
-                    text_encoder=accelerator.unwrap_model(text_encoder_one),
-                    text_encoder_2=accelerator.unwrap_model(text_encoder_two),
-                    unet=accelerator.unwrap_model(unet),
-                    revision=args.revision,
-                    torch_dtype=weight_dtype,
-                )
-
-                # We train on the simplified learning objective. If we were previously predicting a variance, we need the scheduler to ignore it
-                scheduler_args = {}
-
-                if "variance_type" in pipeline.scheduler.config:
-                    variance_type = pipeline.scheduler.config.variance_type
-
-                    if variance_type in ["learned", "learned_range"]:
-                        variance_type = "fixed_small"
-
-                    scheduler_args["variance_type"] = variance_type
-
-                pipeline.scheduler = DPMSolverMultistepScheduler.from_config(
-                    pipeline.scheduler.config, **scheduler_args
-                )
-
-                pipeline = pipeline.to(accelerator.device)
-                pipeline.set_progress_bar_config(disable=True)
-
-                # run inference
-                generator = torch.Generator(device=accelerator.device).manual_seed(args.seed) if args.seed else None
-                pipeline_args = {"prompt": args.validation_prompt}
-
-                with torch.cuda.amp.autocast():
-                    images = [
-                        pipeline(**pipeline_args, generator=generator).images[0]
-                        for _ in range(args.num_validation_images)
-                    ]
-
-                # TODO save validation images to disk
-
-                del pipeline
-                torch.cuda.empty_cache()
 
     # Save the lora layers
     accelerator.wait_for_everyone()

@@ -32,7 +32,8 @@
                 "--resolution=1024",
                 // "--train_text_encoder",
                 "--train_batch_size=2",
-                "--max_train_steps=1500",
+                "--max_train_steps=2500",
+                "--checkpointing_steps=250",
                 "--gradient_accumulation_steps=2",
                 "--gradient_checkpointing",
                 "--learning_rate=1e-5",
@@ -44,6 +45,10 @@
                 // "--prior_generation_precision=fp16",
                 // "--enable_xformers_memory_efficient_attention",
                 "--rank=32",
+                "--validation_prompts_path=/home/avcr/Desktop/ihsan/diffusers-pixery/diffusers/runs/validation_prompts.json",
+                "--validation_steps=250",
+                "--validation_min_steps=1",
+                "--checkpointing_min_steps=1",
             ]
         },
         {
