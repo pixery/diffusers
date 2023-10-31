@@ -25,15 +25,13 @@ import warnings
 from pathlib import Path
 from typing import Dict
 
-import numpy as np
 import torch
 import torch.nn.functional as F
 import torch.utils.checkpoint
 import transformers
 from accelerate import Accelerator
 from accelerate.logging import get_logger
-from accelerate.utils import ProjectConfiguration, set_seed
-from huggingface_hub import create_repo, upload_folder
+from accelerate.utils import set_seed
 from packaging import version
 from PIL import Image
 from PIL.ImageOps import exif_transpose
@@ -53,7 +51,7 @@ from diffusers import (
 from diffusers.loaders import LoraLoaderMixin, text_encoder_lora_state_dict
 from diffusers.models.attention_processor import LoRAAttnProcessor, LoRAAttnProcessor2_0
 from diffusers.optimization import get_scheduler
-from diffusers.utils import check_min_version, is_wandb_available
+from diffusers.utils import check_min_version
 from diffusers.utils.import_utils import is_xformers_available
 
 
@@ -61,42 +59,6 @@ from diffusers.utils.import_utils import is_xformers_available
 check_min_version("0.21.0")
 
 logger = get_logger(__name__)
-
-
-def save_model_card(
-    repo_id: str, images=None, base_model=str, train_text_encoder=False, prompt=str, repo_folder=None, vae_path=None
-):
-    img_str = ""
-    for i, image in enumerate(images):
-        image.save(os.path.join(repo_folder, f"image_{i}.png"))
-        img_str += f"![img_{i}](./image_{i}.png)\n"
-
-    yaml = f"""
----
-license: openrail++
-base_model: {base_model}
-instance_prompt: {prompt}
-tags:
-- stable-diffusion-xl
-- stable-diffusion-xl-diffusers
-- text-to-image
-- diffusers
-- lora
-inference: true
----
-    """
-    model_card = f"""
-# LoRA DreamBooth - {repo_id}
-
-These are LoRA adaption weights for {base_model}. The weights were trained on {prompt} using [DreamBooth](https://dreambooth.github.io/). You can find some example images in the following. \n
-{img_str}
-
-LoRA for the text encoder was enabled: {train_text_encoder}.
-
-Special VAE used for training: {vae_path}.
-"""
-    with open(os.path.join(repo_folder, "README.md"), "w") as f:
-        f.write(yaml + model_card)
 
 
 def import_model_class_from_model_name_or_path(
@@ -414,6 +376,16 @@ def parse_args(input_args=None):
     else:
         args = parser.parse_args()
 
+    if args.revision is not None:
+        warnings.warn("--revision is ill defined in the current implementation, and is ignored.")
+        args.revision = None
+
+    if args.push_to_hub or args.hub_token is not None or args.hub_model_id is not None:
+        warnings.warn("huggingface hub functionality is disabled.")
+
+    if args.logging_dir != "log" or args.report_to != "tensorboard":
+        warnings.warn("tensorboard / wandb / comet_ml logging functionality is disabled.")
+
     env_local_rank = int(os.environ.get("LOCAL_RANK", -1))
     if env_local_rank != -1 and env_local_rank != args.local_rank:
         args.local_rank = env_local_rank
@@ -592,21 +564,10 @@ def unet_attn_processors_state_dict(unet) -> Dict[str, torch.tensor]:
 
 
 def main(args):
-    logging_dir = Path(args.output_dir, args.logging_dir)
-
-    accelerator_project_config = ProjectConfiguration(project_dir=args.output_dir, logging_dir=logging_dir)
-
     accelerator = Accelerator(
         gradient_accumulation_steps=args.gradient_accumulation_steps,
         mixed_precision=args.mixed_precision,
-        log_with=args.report_to,
-        project_config=accelerator_project_config,
     )
-
-    if args.report_to == "wandb":
-        if not is_wandb_available():
-            raise ImportError("Make sure to install wandb if you want to use it for logging during training.")
-        import wandb
 
     # Make one log on every process with the configuration for debugging.
     logging.basicConfig(
@@ -694,11 +655,6 @@ def main(args):
     if accelerator.is_main_process:
         if args.output_dir is not None:
             os.makedirs(args.output_dir, exist_ok=True)
-
-        if args.push_to_hub:
-            repo_id = create_repo(
-                repo_id=args.hub_model_id or Path(args.output_dir).name, exist_ok=True, token=args.hub_token
-            ).repo_id
 
     # Load the tokenizers
     tokenizer_one = AutoTokenizer.from_pretrained(
@@ -1033,10 +989,8 @@ def main(args):
     # Afterwards we recalculate our number of training epochs
     args.num_train_epochs = math.ceil(args.max_train_steps / num_update_steps_per_epoch)
 
-    # We need to initialize the trackers we use, and also store our configuration.
-    # The trackers initializes automatically on the main process.
     if accelerator.is_main_process:
-        accelerator.init_trackers("dreambooth-lora-sd-xl", config=vars(args))
+        pass
 
     # Train!
     total_batch_size = args.train_batch_size * accelerator.num_processes * args.gradient_accumulation_steps
@@ -1217,7 +1171,6 @@ def main(args):
 
             logs = {"loss": loss.detach().item(), "lr": lr_scheduler.get_last_lr()[0]}
             progress_bar.set_postfix(**logs)
-            accelerator.log(logs, step=global_step)
 
             if global_step >= args.max_train_steps:
                 break
@@ -1274,19 +1227,7 @@ def main(args):
                         for _ in range(args.num_validation_images)
                     ]
 
-                for tracker in accelerator.trackers:
-                    if tracker.name == "tensorboard":
-                        np_images = np.stack([np.asarray(img) for img in images])
-                        tracker.writer.add_images("validation", np_images, epoch, dataformats="NHWC")
-                    if tracker.name == "wandb":
-                        tracker.log(
-                            {
-                                "validation": [
-                                    wandb.Image(image, caption=f"{i}: {args.validation_prompt}")
-                                    for i, image in enumerate(images)
-                                ]
-                            }
-                        )
+                # TODO save validation images to disk
 
                 del pipeline
                 torch.cuda.empty_cache()
@@ -1313,8 +1254,6 @@ def main(args):
             text_encoder_lora_layers=text_encoder_lora_layers,
             text_encoder_2_lora_layers=text_encoder_2_lora_layers,
         )
-
-    accelerator.end_training()
 
 
 if __name__ == "__main__":
