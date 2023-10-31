@@ -1239,6 +1239,8 @@ def main(args):
                             text_encoder_two = text_encoder_cls_two.from_pretrained(
                                 args.pretrained_model_name_or_path, subfolder="text_encoder_2", revision=args.revision
                             )
+                            text_encoder_one.to(accelerator.device, dtype=weight_dtype)
+                            text_encoder_two.to(accelerator.device, dtype=weight_dtype)
                         pipeline = StableDiffusionXLPipeline.from_pretrained(
                             args.pretrained_model_name_or_path,
                             vae=vae,
@@ -1270,7 +1272,7 @@ def main(args):
                             )
                             pipeline.scheduler = scheduler
                             if not args.seed:
-                                with torch.cuda.amp.autocast():
+                                with torch.cuda.amp.autocast(dtype=weight_dtype):
                                     images = [
                                         infer_compel(
                                             pipe=pipeline,
@@ -1289,7 +1291,7 @@ def main(args):
                                 images = []
                                 for val_seed in validation_seeds:
                                     generator = torch.Generator(device=accelerator.device).manual_seed(val_seed)
-                                    with torch.cuda.amp.autocast():
+                                    with torch.cuda.amp.autocast(dtype=weight_dtype):
                                         images.append(
                                             infer_compel(
                                                 pipe=pipeline,
@@ -1333,6 +1335,8 @@ def main(args):
                                     save_path = validation_dir_by_seed / save_name
                                     val_image.save(save_path)
 
+                        if not args.train_text_encoder:
+                            del text_encoder_one, text_encoder_two
                         del pipeline
                         del compel_1, compel_2
                         torch.cuda.empty_cache()

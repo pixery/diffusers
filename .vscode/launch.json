@@ -66,7 +66,7 @@
             "type": "python",
             "request": "launch",
             "cwd": "${workspaceFolder}/examples/dreambooth",
-            "module": "utils.compel",
+            "module": "diffusers_utils.compel",
             "console": "integratedTerminal",
             "consoleTitle": "Debug Session",
             "redirectOutput": true,
