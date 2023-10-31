@@ -634,15 +634,33 @@ def main(args):
         cur_class_images = len(list(class_images_dir.iterdir()))
 
         if cur_class_images < args.num_class_images:
+            if args.pretrained_vae_model_name_or_path is None and args.prior_generation_precision == "fp16":
+                raise ValueError(
+                    "SDXL's default VAE does not support generation at fp16 precision. "
+                    "See madebyollin/sdxl-vae-fp16-fix"
+                )
             torch_dtype = torch.float16 if accelerator.device.type == "cuda" else torch.float32
+            torch_dtype = torch_dtype if args.pretrained_vae_model_name_or_path is not None else torch.float32
             if args.prior_generation_precision == "fp32":
                 torch_dtype = torch.float32
             elif args.prior_generation_precision == "fp16":
                 torch_dtype = torch.float16
             elif args.prior_generation_precision == "bf16":
                 torch_dtype = torch.bfloat16
+            vae_path = (
+                args.pretrained_model_name_or_path
+                if args.pretrained_vae_model_name_or_path is None
+                else args.pretrained_vae_model_name_or_path
+            )
+            vae = AutoencoderKL.from_pretrained(
+                vae_path,
+                subfolder="vae" if args.pretrained_vae_model_name_or_path is None else None,
+                revision=args.revision,
+            )
+            vae.to(accelerator.device, dtype=torch_dtype)
             pipeline = StableDiffusionXLPipeline.from_pretrained(
                 args.pretrained_model_name_or_path,
+                vae=vae,
                 torch_dtype=torch_dtype,
                 revision=args.revision,
             )
@@ -667,6 +685,7 @@ def main(args):
                     image_filename = class_images_dir / f"{example['index'][i] + cur_class_images}-{hash_image}.jpg"
                     image.save(image_filename)
 
+            del vae
             del pipeline
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
@@ -734,8 +753,9 @@ def main(args):
     # Move unet, vae and text_encoder to device and cast to weight_dtype
     unet.to(accelerator.device, dtype=weight_dtype)
 
-    # The VAE is always in float32 to avoid NaN losses.
-    vae.to(accelerator.device, dtype=torch.float32)
+    # VAE float16 to float32 to avoid NaN losses.
+    vae_weight_dtype = weight_dtype if accelerator.mixed_precision != "fp16" else torch.float32
+    vae.to(accelerator.device, dtype=vae_weight_dtype)
 
     text_encoder_one.to(accelerator.device, dtype=weight_dtype)
     text_encoder_two.to(accelerator.device, dtype=weight_dtype)
@@ -1079,7 +1099,7 @@ def main(args):
                 # Convert images to latent space
                 model_input = vae.encode(pixel_values).latent_dist.sample()
                 model_input = model_input * vae.config.scaling_factor
-                if args.pretrained_vae_model_name_or_path is None:
+                if accelerator.mixed_precision == "fp16":
                     model_input = model_input.to(weight_dtype)
 
                 # Sample noise that we'll add to the latents
