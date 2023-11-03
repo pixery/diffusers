@@ -477,9 +477,11 @@ class DreamBoothDataset(Dataset):
         class_num=None,
         size=1024,
         use_face_mask_weighted_loss=False,
+        vae_scale_factor=None,
     ):
         self.size = size
         self.use_face_mask_weighted_loss = use_face_mask_weighted_loss
+        self.vae_scale_factor = vae_scale_factor
 
         # preprocess
         if not Path(instance_data_dir).exists():
@@ -539,7 +541,14 @@ class DreamBoothDataset(Dataset):
                 transforms.Normalize([0.5], [0.5]),
             ]
         )
-        self.mask_transform = transforms.ToTensor()
+        self.mask_transforms = transforms.Compose(
+            [
+                transforms.ToTensor(),
+                transforms.Resize(
+                    self.size // self.vae_scale_factor, interpolation=transforms.InterpolationMode.NEAREST
+                ),
+            ]
+        )
 
     def __len__(self):
         return self._length
@@ -551,7 +560,7 @@ class DreamBoothDataset(Dataset):
 
         if self.use_face_mask_weighted_loss:
             instance_mask = Image.open(self.instance_mask_paths[index % self.num_instance_images])
-            example["instance_masks"] = self.mask_transform(instance_mask)
+            example["instance_masks"] = self.mask_transforms(instance_mask)
 
         if self.class_data_dir:
             class_image = Image.open(self.class_images_path[index % self.num_class_images])
@@ -1050,6 +1059,7 @@ def main(args):
         class_num=args.num_class_images,
         size=args.resolution,
         use_face_mask_weighted_loss=args.use_face_mask_weighted_loss,
+        vae_scale_factor=2 ** (len(vae.config.block_out_channels) - 1),
     )
 
     train_dataloader = torch.utils.data.DataLoader(
@@ -1232,7 +1242,10 @@ def main(args):
                     target, target_prior = torch.chunk(target, 2, dim=0)
 
                     # Compute instance loss
-                    loss = F.mse_loss(model_pred.float(), target.float(), reduction="mean")
+                    se = (model_pred.float() - target.float()).pow(2)
+                    if args.use_face_mask_weighted_loss:
+                        se = se * masks
+                    loss = se.mean()
 
                     # Compute prior loss
                     prior_loss = F.mse_loss(model_pred_prior.float(), target_prior.float(), reduction="mean")
@@ -1240,7 +1253,10 @@ def main(args):
                     # Add the prior loss to the instance loss.
                     loss = loss + args.prior_loss_weight * prior_loss
                 else:
-                    loss = F.mse_loss(model_pred.float(), target.float(), reduction="mean")
+                    se = (model_pred.float() - target.float()).pow(2)
+                    if args.use_face_mask_weighted_loss:
+                        se = se * masks
+                    loss = se.mean()
 
                 accelerator.backward(loss)
                 if accelerator.sync_gradients:
