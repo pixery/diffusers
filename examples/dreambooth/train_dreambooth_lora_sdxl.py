@@ -24,7 +24,7 @@ import os
 import shutil
 import warnings
 from pathlib import Path
-from typing import Dict
+from typing import Dict, assert_never
 
 import torch
 import torch.nn.functional as F
@@ -36,17 +36,13 @@ import transformers
 from accelerate import Accelerator
 from accelerate.logging import get_logger
 from accelerate.utils import set_seed
-from diffusers import (
-    AutoencoderKL,
-    DDPMScheduler,
-    StableDiffusionXLPipeline,
-    UNet2DConditionModel,
-)
+from diffusers import AutoencoderKL, DDPMScheduler, StableDiffusionXLPipeline, UNet2DConditionModel
 from diffusers.loaders import LoraLoaderMixin, text_encoder_lora_state_dict
 from diffusers.models.attention_processor import LoRAAttnProcessor, LoRAAttnProcessor2_0
 from diffusers.optimization import get_scheduler
 from diffusers.utils import check_min_version
 from diffusers.utils.import_utils import is_xformers_available
+from natsort import natsorted, ns
 from packaging import version
 from PIL import Image
 from PIL.ImageOps import exif_transpose
@@ -55,6 +51,7 @@ from tqdm.auto import tqdm
 from transformers import AutoTokenizer, PretrainedConfig
 
 from diffusers_utils.compel import infer_compel, load_compels
+from diffusers_utils.preprocess import preprocess
 from diffusers_utils.schedulers import get_diffusers_scheduler
 
 
@@ -203,8 +200,8 @@ def parse_args(input_args=None):
         default=False,
         action="store_true",
         help=(
-            "Whether to center crop the input images to the resolution. If not set, the images will be randomly"
-            " cropped. The images will be resized to the resolution first before cropping."
+            "[DEPRECATED] Whether to center crop the input images to the resolution. If not set, the images will be"
+            " randomly cropped. The images will be resized to the resolution first before cropping."
         ),
     )
     parser.add_argument(
@@ -400,6 +397,29 @@ def parse_args(input_args=None):
         default=None,
         help="Number of steps strictly before the completion of which no checkpointing should be performed.",
     )
+    parser.add_argument(
+        "--no_trim_based_on_face",
+        dest="trim_based_on_face",
+        action="store_false",
+        help="Disable square-trimming the instances by trying to center the face region (which is enabled by default).",
+    )
+    parser.add_argument(
+        "--no_apply_face_crop",
+        dest="apply_face_crop",
+        action="store_false",
+        help="Disable cropping around the faces in instance images (which is enabled by default).",
+    )
+    parser.add_argument(
+        "--face_crop_expand_factor",
+        type=float,
+        default=1.5,
+        help="Factor that controls how much the detected face box should be expanded for the face-centered crop.",
+    )
+    parser.add_argument(
+        "--use_face_mask_weighted_loss",
+        action="store_true",
+        help="Whether to use a masked loss focusing on the face region.",
+    )
 
     if input_args is not None:
         args = parser.parse_args(input_args)
@@ -415,6 +435,9 @@ def parse_args(input_args=None):
 
     if args.validation_epochs != 50:
         warnings.warn("--validation_epochs is deprecated; use --validation_steps.")
+
+    if args.center_crop:
+        warnings.warn("--center_crop is deprecated.")
 
     if args.push_to_hub or args.hub_token is not None or args.hub_model_id is not None:
         warnings.warn("huggingface hub functionality is disabled.")
@@ -449,60 +472,90 @@ class DreamBoothDataset(Dataset):
 
     def __init__(
         self,
-        instance_data_root,
-        class_data_root=None,
+        instance_data_dir,
+        class_data_dir=None,
         class_num=None,
         size=1024,
-        center_crop=False,
+        use_face_mask_weighted_loss=False,
     ):
         self.size = size
-        self.center_crop = center_crop
+        self.use_face_mask_weighted_loss = use_face_mask_weighted_loss
 
-        self.instance_data_root = Path(instance_data_root)
-        if not self.instance_data_root.exists():
+        # preprocess
+        if not Path(instance_data_dir).exists():
             raise ValueError("Instance images root doesn't exists.")
+        processed_instance_data_dir = preprocess(
+            instance_data_dir,
+            target_size=size,
+            trim_based_on_face=args.trim_based_on_face,
+            apply_face_crop=args.apply_face_crop,
+            face_crop_expand_factor=args.face_crop_expand_factor,
+            force_reprocess=False,
+        )
+        self.processed_instance_data_dir = processed_instance_data_dir
 
-        self.instance_images_path = list(Path(instance_data_root).iterdir())
-        self.num_instance_images = len(self.instance_images_path)
+        instance_data_paths = list(Path(self.processed_instance_data_dir).iterdir())
+        instance_image_paths = []
+        instance_mask_paths = []
+        for path in instance_data_paths:
+            if path.stem.endswith(".src"):
+                instance_image_paths.append(path)
+            elif path.stem.endswith(".mask"):
+                instance_mask_paths.append(path)
+            else:
+                assert_never(path)
+        self.instance_image_paths = natsorted(instance_image_paths, alg=ns.PATH)
+        self.instance_mask_paths = natsorted(instance_mask_paths, alg=ns.PATH)
+
+        for path in self.instance_image_paths:
+            with Image.open(path) as im:
+                assert im.size == (self.size, self.size)
+        self.num_instance_images = len(self.instance_image_paths)
         self._length = self.num_instance_images
 
-        if class_data_root is not None:
-            self.class_data_root = Path(class_data_root)
-            self.class_data_root.mkdir(parents=True, exist_ok=True)
-            self.class_images_path = list(self.class_data_root.iterdir())
+        for path in self.instance_mask_paths:
+            with Image.open(path) as mask:
+                assert mask.size == (self.size, self.size)
+        assert len(self.instance_mask_paths) == self.num_instance_images
+
+        if class_data_dir is not None:
+            self.class_data_dir = Path(class_data_dir)
+            self.class_data_dir.mkdir(parents=True, exist_ok=True)
+            self.class_images_path = list(self.class_data_dir.iterdir())
+            for path in self.class_images_path:
+                with Image.open(path) as im:
+                    assert im.size == (self.size, self.size)
             if class_num is not None:
                 self.num_class_images = min(len(self.class_images_path), class_num)
             else:
                 self.num_class_images = len(self.class_images_path)
             self._length = max(self.num_class_images, self.num_instance_images)
         else:
-            self.class_data_root = None
+            self.class_data_dir = None
 
         self.image_transforms = transforms.Compose(
             [
-                transforms.Resize(size, interpolation=transforms.InterpolationMode.BILINEAR),
-                transforms.CenterCrop(size) if center_crop else transforms.RandomCrop(size),
                 transforms.ToTensor(),
                 transforms.Normalize([0.5], [0.5]),
             ]
         )
+        self.mask_transform = transforms.ToTensor()
 
     def __len__(self):
         return self._length
 
     def __getitem__(self, index):
         example = {}
-        instance_image = Image.open(self.instance_images_path[index % self.num_instance_images])
-        instance_image = exif_transpose(instance_image)
-
-        if not instance_image.mode == "RGB":
-            instance_image = instance_image.convert("RGB")
+        instance_image = Image.open(self.instance_image_paths[index % self.num_instance_images])
         example["instance_images"] = self.image_transforms(instance_image)
 
-        if self.class_data_root:
+        if self.use_face_mask_weighted_loss:
+            instance_mask = Image.open(self.instance_mask_paths[index % self.num_instance_images])
+            example["instance_masks"] = self.mask_transform(instance_mask)
+
+        if self.class_data_dir:
             class_image = Image.open(self.class_images_path[index % self.num_class_images])
             class_image = exif_transpose(class_image)
-
             if not class_image.mode == "RGB":
                 class_image = class_image.convert("RGB")
             example["class_images"] = self.image_transforms(class_image)
@@ -510,8 +563,10 @@ class DreamBoothDataset(Dataset):
         return example
 
 
-def collate_fn(examples, with_prior_preservation=False):
+def collate_fn(examples, with_prior_preservation=False, use_face_mask_weighted_loss=False):
     pixel_values = [example["instance_images"] for example in examples]
+    if use_face_mask_weighted_loss:
+        masks = [example["instance_masks"] for example in examples]
 
     # Concat class and instance examples for prior preservation.
     # We do this to avoid doing two forward passes.
@@ -520,8 +575,11 @@ def collate_fn(examples, with_prior_preservation=False):
 
     pixel_values = torch.stack(pixel_values)
     pixel_values = pixel_values.to(memory_format=torch.contiguous_format).float()
-
     batch = {"pixel_values": pixel_values}
+    if use_face_mask_weighted_loss:
+        masks = torch.stack(masks)
+        masks = masks.to(memory_format=torch.contiguous_format).float()
+        batch["masks"] = masks
     return batch
 
 
@@ -699,7 +757,7 @@ def main(args):
         checkpoints_dir.mkdir(exist_ok=True)
 
         args_save_path = Path(args.output_dir, "args.json")
-        with open(args_save_path, 'w') as f:
+        with open(args_save_path, "w") as f:
             json.dump(vars(args), f, indent=2)
 
     # Load the tokenizers
@@ -987,18 +1045,20 @@ def main(args):
 
     # Dataset and DataLoaders creation:
     train_dataset = DreamBoothDataset(
-        instance_data_root=args.instance_data_dir,
-        class_data_root=args.class_data_dir if args.with_prior_preservation else None,
+        instance_data_dir=args.instance_data_dir,
+        class_data_dir=args.class_data_dir if args.with_prior_preservation else None,
         class_num=args.num_class_images,
         size=args.resolution,
-        center_crop=args.center_crop,
+        use_face_mask_weighted_loss=args.use_face_mask_weighted_loss,
     )
 
     train_dataloader = torch.utils.data.DataLoader(
         train_dataset,
         batch_size=args.train_batch_size,
         shuffle=True,
-        collate_fn=lambda examples: collate_fn(examples, args.with_prior_preservation),
+        collate_fn=lambda examples: collate_fn(
+            examples, args.with_prior_preservation, args.use_face_mask_weighted_loss
+        ),
         num_workers=args.dataloader_num_workers,
     )
 
@@ -1106,6 +1166,8 @@ def main(args):
 
             with accelerator.accumulate(unet):
                 pixel_values = batch["pixel_values"].to(dtype=vae.dtype)
+                if args.use_face_mask_weighted_loss:
+                    masks = batch["masks"]
 
                 # Convert images to latent space
                 model_input = vae.encode(pixel_values).latent_dist.sample()
