@@ -698,6 +698,10 @@ def main(args):
         checkpoints_dir = Path(args.output_dir, "checkpoints")
         checkpoints_dir.mkdir(exist_ok=True)
 
+        args_save_path = Path(args.output_dir, "args.json")
+        with open(args_save_path, 'w') as f:
+            json.dump(vars(args), f, indent=2)
+
     # Load the tokenizers
     tokenizer_one = AutoTokenizer.from_pretrained(
         args.pretrained_model_name_or_path, subfolder="tokenizer", revision=args.revision, use_fast=False

@@ -1,5 +1,8 @@
 import json
+from pathlib import Path
 from typing import Literal, NamedTuple
+
+from natsort import natsorted, ns
 
 
 SCHEDULER_TYPE = Literal[
@@ -148,10 +151,23 @@ TEST_CONFIGS = [
     # ),
 ]
 
+SAVE_DIR = Path("/home/avcr/Desktop/ihsan/diffusers-pixery/diffusers/inputs/validation-prompts")
+
+
+def get_save_name():
+    current_files = [p.stem for p in SAVE_DIR.iterdir()]
+    current_files = natsorted(current_files, alg=ns.PATH)
+    most_recent_file_id = max([int(f.split("-")[1]) for f in current_files] or [-1])
+    current_file_id = most_recent_file_id + 1
+    save_name = f"validation_prompts-{current_file_id:02d}.json"
+    return save_name
+
 
 def dump_configs():
     configs = [c._asdict() for c in TEST_CONFIGS]
-    with open("/home/avcr/Desktop/ihsan/diffusers-pixery/diffusers/runs/validation_prompts.json", "w") as f:
+    save_name = get_save_name()
+    save_path = SAVE_DIR / save_name
+    with open(save_path, "w") as f:
         json.dump(configs, f, indent=2)
 
 
