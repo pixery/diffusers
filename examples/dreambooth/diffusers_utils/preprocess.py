@@ -350,7 +350,7 @@ def preprocess(
     target_size=1024,
     trim_based_on_face=True,
     apply_face_crop=True,
-    face_crop_expand_factor=1.5,
+    face_crop_expand_factor=1.61,
     force_reprocess=False,
 ):
     """Loads images, saves masks.
