@@ -105,25 +105,25 @@ def get_surrounding_box_for_mask(mask, pad_percentage=5.0):
 
     crop_left = 0
     for i in range(w):
-        if not (mask[:, i] == 0).all():
+        if not (mask[:, i] < 128).all():
             break
         crop_left += 1
 
     crop_right = 0
     for i in reversed(range(w)):
-        if not (mask[:, i] == 0).all():
+        if not (mask[:, i] < 128).all():
             break
         crop_right += 1
 
     crop_top = 0
     for i in range(h):
-        if not (mask[i] == 0).all():
+        if not (mask[i] < 128).all():
             break
         crop_top += 1
 
     crop_bottom = 0
     for i in reversed(range(h)):
-        if not (mask[i] == 0).all():
+        if not (mask[i] < 128).all():
             break
         crop_bottom += 1
 
@@ -158,7 +158,7 @@ def expand_face_bboxes(bboxes, masks, pad_percentage=5.0):
             mask = np.array(mask)
             mask_top = 0
             for i in range(h):
-                if not (mask[i] == 0).all():
+                if not (mask[i] < 128).all():
                     break
                 mask_top += 1
             top_margin = box_top - mask_top
@@ -386,8 +386,8 @@ def preprocess(
     images = [im.convert("RGB") for im in images]
 
     print(f"Generating {len(images)} masks...")
-    face_bboxes = get_face_bboxes(images)
-    seg_masks, face_bboxes = get_face_masks_and_expanded_face_bboxes(images, face_bboxes)
+    face_bboxes_raw = get_face_bboxes(images)
+    seg_masks, face_bboxes = get_face_masks_and_expanded_face_bboxes(images, face_bboxes_raw)
 
     # based on the center of mass, trim the image to a square (chop sides off rectangular images, making them squares)
     if trim_based_on_face:
@@ -397,16 +397,20 @@ def preprocess(
     trim_boxes = [get_box_for_trim_to_square(image, com) for image, com in zip(images, coms)]
     # adjust trim_boxes such that they also cover the face boxes
     trim_boxes_adjusted = []
-    for ((face_left, face_upper, *_), _), (trim_left, trim_upper, trim_right, trim_lower) in zip(
-        face_bboxes, trim_boxes
+    for (((_, face_upper, *_), _), face_bbox_raw, (trim_left, trim_upper, trim_right, trim_lower), image) in zip(
+        face_bboxes, face_bboxes_raw, trim_boxes, images
     ):
-        delta_x = max(trim_left - face_left, 0)
         delta_y = max(trim_upper - face_upper, 0)
-        trim_left = trim_left - delta_x
         trim_upper = trim_upper - delta_y
-        trim_right = trim_right - delta_x
         trim_lower = trim_lower - delta_y
+
         trim_box_adjusted = (trim_left, trim_upper, trim_right, trim_lower)
+        if face_bbox_raw is not None:
+            face_left_raw, face_upper_raw, face_right_raw, face_lower_raw = face_bbox_raw
+            if trim_lower < face_lower_raw:
+                # bad face mask has led to a too large an expansion of the face box
+                com_box = ((face_left_raw + face_right_raw) / 2, (face_upper_raw + face_lower_raw) / 2)
+                trim_box_adjusted = get_box_for_trim_to_square(image, com_box)
         trim_boxes_adjusted.append(trim_box_adjusted)
 
     images = [image.crop(box) for image, box in zip(images, trim_boxes_adjusted)]
