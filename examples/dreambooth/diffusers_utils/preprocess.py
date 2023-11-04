@@ -68,7 +68,7 @@ def get_face_bboxes(images):
             )
             face_bboxes.append(bbox_lurl)
         else:
-            raise RuntimeError
+            face_bboxes.append(None)
 
     return face_bboxes
 
@@ -99,33 +99,86 @@ def segment(images, *, device=DEFAULT_DEVICE):
     return masks
 
 
+def get_surrounding_box_for_mask(mask, pad_percentage=5.0):
+    w, h = mask.size
+    mask = np.array(mask)
+
+    crop_left = 0
+    for i in range(w):
+        if not (mask[:, i] == 0).all():
+            break
+        crop_left += 1
+
+    crop_right = 0
+    for i in reversed(range(w)):
+        if not (mask[:, i] == 0).all():
+            break
+        crop_right += 1
+
+    crop_top = 0
+    for i in range(h):
+        if not (mask[i] == 0).all():
+            break
+        crop_top += 1
+
+    crop_bottom = 0
+    for i in reversed(range(h)):
+        if not (mask[i] == 0).all():
+            break
+        crop_bottom += 1
+
+    crop_width = w - (crop_right + crop_left)
+    crop_height = h - (crop_bottom + crop_top)
+    pad_x = crop_width * (2 * pad_percentage / 100)
+    pad_y = crop_height * (2 * pad_percentage / 100)
+    pad_left = pad_x // 2
+    pad_right = pad_x - pad_left
+    pad_top = pad_y // 2
+    pad_bottom = pad_y - pad_top
+
+    return (
+        int(max(crop_left - pad_left, 0)),
+        int(max(crop_top - pad_top, 0)),
+        int(min(w - crop_right + pad_right, w)),
+        int(min(h - crop_bottom + pad_bottom, h)),
+    )
+
+
 def expand_face_bboxes(bboxes, masks, pad_percentage=5.0):
     boxes_expanded = []
-    for mask, (box_left, box_top, box_right, box_bottom) in zip(masks, bboxes):
-        w, h = mask.size
-        h_box = box_bottom - box_top
-        w_box = box_right - box_left
+    for mask, box in zip(masks, bboxes):
+        if box is not None:
+            box_is_for_face = True
 
-        mask = np.array(mask)
-        mask_top = 0
-        for i in range(h):
-            if not (mask[i] == 0).all():
-                break
-            mask_top += 1
-        top_margin = box_top - mask_top
-        expand_factor = top_margin / h_box
-        left_margin = round(expand_factor * w_box)
+            box_left, box_top, box_right, box_bottom = box
+            w, h = mask.size
+            h_box = box_bottom - box_top
+            w_box = box_right - box_left
 
-        margin_y = round(top_margin * (1 + pad_percentage / 100))
-        margin_x = round(left_margin * (1 + pad_percentage / 100))
+            mask = np.array(mask)
+            mask_top = 0
+            for i in range(h):
+                if not (mask[i] == 0).all():
+                    break
+                mask_top += 1
+            top_margin = box_top - mask_top
+            expand_factor = top_margin / h_box
+            left_margin = round(expand_factor * w_box)
 
-        box_expanded = (
-            int(max(box_left - margin_x, 0)),
-            int(max(box_top - margin_y, 0)),
-            int(min(box_right + margin_x, w)),
-            int(min(box_bottom + margin_y, h)),
-        )
-        boxes_expanded.append(box_expanded)
+            margin_y = round(top_margin * (1 + pad_percentage / 100))
+            margin_x = round(left_margin * (1 + pad_percentage / 100))
+
+            box_expanded = (
+                int(max(box_left - margin_x, 0)),
+                int(max(box_top - margin_y, 0)),
+                int(min(box_right + margin_x, w)),
+                int(min(box_bottom + margin_y, h)),
+            )
+            boxes_expanded.append((box_expanded, box_is_for_face))
+        else:
+            box_is_for_face = False
+            surrounding_box = get_surrounding_box_for_mask(mask)
+            boxes_expanded.append((surrounding_box, box_is_for_face))
 
     return boxes_expanded
 
@@ -135,30 +188,51 @@ def get_face_masks_and_expanded_face_bboxes(images, face_bboxes, blur_amount=0.0
     boxes_expanded = expand_face_bboxes(face_bboxes, masks_full)
 
     masks_face = []
-    for mask_full, face_bbox in tqdm(zip(masks_full, boxes_expanded)):
-        mask_np = np.array(mask_full)
-        iw, ih = mask_full.size
+    for mask_full, face_bbox_and_status in tqdm(zip(masks_full, boxes_expanded)):
+        face_bbox, box_is_for_face = face_bbox_and_status
 
-        bbox_zero_mask = np.ones((ih, iw), dtype=bool)
-        bbox_zero_mask[face_bbox[1] : face_bbox[3], face_bbox[0] : face_bbox[2]] = False
-        mask_np[bbox_zero_mask] = 0
-        mask_face = Image.fromarray(mask_np)
+        if box_is_for_face:
+            mask_np = np.array(mask_full)
+            iw, ih = mask_full.size
 
-        # Apply blur to the mask
-        if blur_amount > 0:
-            mask_face = mask_face.filter(ImageFilter.GaussianBlur(blur_amount))
+            bbox_zero_mask = np.ones((ih, iw), dtype=bool)
+            bbox_zero_mask[face_bbox[1] : face_bbox[3], face_bbox[0] : face_bbox[2]] = False
+            mask_np[bbox_zero_mask] = 0
+            mask_face = Image.fromarray(mask_np)
 
-        # Apply bias to the mask
-        if bias > 0:
-            mask_face = np.array(mask_face)
-            mask_face = mask_face + bias * np.ones(mask_face.shape, dtype=mask_face.dtype)
-            mask_face = np.clip(mask_face, 0, 255)
-            mask_face = Image.fromarray(mask_face)
+            # Apply blur to the mask
+            if blur_amount > 0:
+                mask_face = mask_face.filter(ImageFilter.GaussianBlur(blur_amount))
 
-        # Convert mask to 'L' mode (grayscale) before saving
-        mask_face = mask_face.convert("L")
+            # Apply bias to the mask
+            if bias > 0:
+                mask_face = np.array(mask_face)
+                mask_face = mask_face + bias * np.ones(mask_face.shape, dtype=mask_face.dtype)
+                mask_face = np.clip(mask_face, 0, 255)
+                mask_face = Image.fromarray(mask_face)
 
-        masks_face.append(mask_face)
+            # Convert mask to 'L' mode (grayscale) before saving
+            mask_face = mask_face.convert("L")
+
+            masks_face.append(mask_face)
+        else:
+            mask_np = np.array(mask_full)
+
+            # Apply blur to the mask
+            if blur_amount > 0:
+                mask_full = mask_full.filter(ImageFilter.GaussianBlur(blur_amount))
+
+            # Apply bias to the mask
+            if bias > 0:
+                mask_full = np.array(mask_full)
+                mask_full = mask_full + bias * np.ones(mask_full.shape, dtype=mask_full.dtype)
+                mask_full = np.clip(mask_full, 0, 255)
+                mask_full = Image.fromarray(mask_full)
+
+            # Convert mask to 'L' mode (grayscale) before saving
+            mask_full = mask_full.convert("L")
+
+            masks_face.append(mask_full)
 
     return masks_face, boxes_expanded
 
@@ -199,7 +273,11 @@ def square_crop_to_face(image, face_bbox, expand_factor=1.0):
     iw, ih = image.size
     assert iw == ih
 
-    x1_face, y1_face, x2_face, y2_face = face_bbox
+    box, box_is_for_face = face_bbox
+    if not box_is_for_face:
+        return image
+
+    x1_face, y1_face, x2_face, y2_face = box
 
     center_x = (x1_face + x2_face) // 2
     center_y = (y1_face + y2_face) // 2
@@ -268,6 +346,7 @@ def get_save_name(input_dir, target_size, trim_based_on_face, apply_face_crop, f
 
 def preprocess(
     input_dir,
+    output_dir=None,
     target_size=1024,
     trim_based_on_face=True,
     apply_face_crop=True,
@@ -279,10 +358,11 @@ def preprocess(
     Loads images from the given files, generates masks for them, and saves the masks and upscaled images to output dir.
     """
     input_dir = Path(input_dir)
-    input_root_dir = input_dir.parents[1]
-    output_root_dir = input_root_dir / 'processed'
-    save_name = get_save_name(input_dir, target_size, trim_based_on_face, apply_face_crop, face_crop_expand_factor)
-    output_dir = output_root_dir / save_name
+    if output_dir is None:
+        input_root_dir = input_dir.parents[1]
+        output_root_dir = input_root_dir / "processed"
+        save_name = get_save_name(input_dir, target_size, trim_based_on_face, apply_face_crop, face_crop_expand_factor)
+        output_dir = output_root_dir / save_name
     if output_dir.is_dir():
         if force_reprocess:
             shutil.rmtree(output_dir)
@@ -317,7 +397,9 @@ def preprocess(
     trim_boxes = [get_box_for_trim_to_square(image, com) for image, com in zip(images, coms)]
     # adjust trim_boxes such that they also cover the face boxes
     trim_boxes_adjusted = []
-    for (face_left, face_upper, *_), (trim_left, trim_upper, trim_right, trim_lower) in zip(face_bboxes, trim_boxes):
+    for ((face_left, face_upper, *_), _), (trim_left, trim_upper, trim_right, trim_lower) in zip(
+        face_bboxes, trim_boxes
+    ):
         delta_x = max(trim_left - face_left, 0)
         delta_y = max(trim_upper - face_upper, 0)
         trim_left = trim_left - delta_x
@@ -332,10 +414,15 @@ def preprocess(
 
     # adjust face bboxes for the post-trim coordinates
     face_bboxes = [
-        (face_left - trim_left, face_upper - trim_upper, face_right - trim_left, face_lower - trim_upper)
-        for (face_left, face_upper, face_right, face_lower), (trim_left, trim_upper, *_) in zip(
-            face_bboxes, trim_boxes_adjusted
+        (
+            (face_left - trim_left, face_upper - trim_upper, face_right - trim_left, face_lower - trim_upper),
+            face_status,
         )
+        for ((face_left, face_upper, face_right, face_lower), face_status), (
+            trim_left,
+            trim_upper,
+            *_,
+        ) in zip(face_bboxes, trim_boxes_adjusted)
     ]
 
     if apply_face_crop:
