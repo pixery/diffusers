@@ -412,7 +412,7 @@ def parse_args(input_args=None):
     parser.add_argument(
         "--face_crop_expand_factor",
         type=float,
-        default=1.5,
+        default=2.585,
         help="Factor that controls how much the detected face box should be expanded for the face-centered crop.",
     )
     parser.add_argument(
@@ -442,7 +442,7 @@ def parse_args(input_args=None):
     if args.push_to_hub or args.hub_token is not None or args.hub_model_id is not None:
         warnings.warn("huggingface hub functionality is disabled.")
 
-    if args.logging_dir != "log" or args.report_to != "tensorboard":
+    if args.logging_dir != "logs" or args.report_to != "tensorboard":
         warnings.warn("tensorboard / wandb / comet_ml logging functionality is disabled.")
 
     env_local_rank = int(os.environ.get("LOCAL_RANK", -1))

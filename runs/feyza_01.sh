@@ -3,14 +3,13 @@ set -euxo pipefail
 
 python examples/dreambooth/train_dreambooth_lora_sdxl.py \
 --pretrained_model_name_or_path="stabilityai/stable-diffusion-xl-base-1.0" \
---instance_data_dir="inputs/input-images/raw/Mobici" \
---class_data_dir="inputs/class-images/sdxl_base_1.0-default_vae_0.9-bf16-150_imgs-1024/man" \
---instance_prompt="photo of ohwx man" \
---class_prompt="photo of man" \
+--instance_data_dir="inputs/input-images/raw/Feyza" \
+--class_data_dir="inputs/class-images/sdxl_base_1.0-default_vae_0.9-bf16-150_imgs-1024/woman" \
+--instance_prompt="photo of ohwx woman" \
+--class_prompt="photo of woman" \
 --num_validation_images=4 \
---with_prior_preservation \
 --num_class_images=150 \
---output_dir="outputs" \
+--output_dir="outputs/feyza_01" \
 --seed=1337 \
 --resolution=1024 \
 --train_batch_size=2 \

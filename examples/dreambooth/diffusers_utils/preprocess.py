@@ -339,7 +339,7 @@ def swin_ir_sr(images, target_size=None, device=DEFAULT_DEVICE):
 def get_save_name(input_dir, target_size, trim_based_on_face, apply_face_crop, face_crop_expand_factor):
     character_id = input_dir.stem
     face_trim_status = f'{"do" if trim_based_on_face else "no"}facetrim'
-    face_crop_status = f'{"do" if apply_face_crop else "no"}facecrop_{face_crop_expand_factor:.2f}'
+    face_crop_status = f'{"do" if apply_face_crop else "no"}facecrop_{face_crop_expand_factor:.3f}'
     resolution_status = f"res_{target_size}"
     return "-".join([character_id, face_trim_status, face_crop_status, resolution_status])
 
@@ -350,7 +350,7 @@ def preprocess(
     target_size=1024,
     trim_based_on_face=True,
     apply_face_crop=True,
-    face_crop_expand_factor=1.61,
+    face_crop_expand_factor=2.585,
     force_reprocess=False,
 ):
     """Loads images, saves masks.

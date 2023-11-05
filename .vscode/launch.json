@@ -25,7 +25,7 @@
                 "--instance_prompt=photo of ohwx man",
                 "--class_prompt=photo of man",
                 "--num_validation_images=4",
-                "--with_prior_preservation",
+                // "--with_prior_preservation",
                 "--num_class_images=150",
                 "--output_dir=outputs/debug",
                 "--seed=1337",
@@ -45,10 +45,11 @@
                 // "--prior_generation_precision=fp16",
                 // "--enable_xformers_memory_efficient_attention",
                 "--rank=32",
-                "--validation_prompts_path=inputs/validation-prompts/validation_prompts-00.json",
+                "--validation_prompts_path=inputs/validation-prompts/validation_prompts-01.json",
                 "--validation_steps=250",
                 "--validation_min_steps=1",
                 "--checkpointing_min_steps=1",
+                // "--use_face_mask_weighted_loss",
             ]
         },
         {
